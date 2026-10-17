@@ -1,0 +1,12 @@
+.git
+.agents
+.codex
+.aws
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+*.py[cod]
+models
+.cache
