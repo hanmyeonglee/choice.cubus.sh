@@ -1,0 +1,92 @@
+{
+  "models": {
+    "gliner-decide": {
+      "repo": "fastino/GLiNER2.5-Decide",
+      "revision": "9d1bfb848cd16d93ee56ccbc59cd92bf0f284d90",
+      "parameters": 486444053,
+      "files": [
+        {
+          "path": "config.json",
+          "bytes": 1612,
+          "sha256": "501c6579278518e72dbba5a1f248b421dd5bfb13600db45d86c94c224368670b"
+        },
+        {
+          "path": "encoder_config/config.json",
+          "bytes": 920,
+          "sha256": "bd32f1484ba5a199f7a63df44df3814b839fffcf6e64478323c4689868ef6015"
+        },
+        {
+          "path": "model.safetensors",
+          "bytes": 1945828140,
+          "sha256": "40a5a23ff860dc3dff426cecd1048cacdd29c648c96db209dad818e9686dc997"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "bytes": 2414,
+          "sha256": "84ea70143f533d7e99b393d87f20010887a9ac2cba955828ef313886e4e83f4f"
+        },
+        {
+          "path": "tokenizer.json",
+          "bytes": 8333952,
+          "sha256": "3ad87d9ffe669147063e70850927dd2da90249e2acc5c8527f1eb65df467bcc8"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "bytes": 3356,
+          "sha256": "323199a4e946039410899f3779f2aa3eaef1500213c512727ad0f623d4f21309"
+        }
+      ]
+    },
+    "laya": {
+      "repo": "convaiinnovations/laya",
+      "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+      "parameters": 421293830,
+      "files": [
+        {
+          "path": "config.json",
+          "bytes": 160,
+          "sha256": "7add7c041b53f7091e65908553af79ab3f077946e5f2312d510ae13b17c7c134"
+        },
+        {
+          "path": "encoder/config.json",
+          "bytes": 2083,
+          "sha256": "bf3ab80598fdccf414855a2ce80f22859e4492d06ca8a62ddd1cfb63972f8979"
+        },
+        {
+          "path": "model.safetensors",
+          "bytes": 842609210,
+          "sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c"
+        },
+        {
+          "path": "rl_agent_config.json",
+          "bytes": 745,
+          "sha256": "ae287b56bbcf5f8c4f4541ae9dfd00c914c4c48b940b8398c3058af37ba92bbd"
+        },
+        {
+          "path": "tokenizer/tokenizer.json",
+          "bytes": 3583228,
+          "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+        },
+        {
+          "path": "tokenizer/tokenizer_config.json",
+          "bytes": 308,
+          "sha256": "50044de60daaa73df97d262e15a40d4faf0160e7d742df64b377877a1320dd12"
+        }
+      ]
+    }
+  },
+  "sources": {
+    "laya": {
+      "repo": "NandhaKishorM/laya",
+      "revision": "d74e8be46ef5241e4ba2b16cd25e896f24f71373",
+      "url": "https://codeload.github.com/NandhaKishorM/laya/tar.gz/d74e8be46ef5241e4ba2b16cd25e896f24f71373",
+      "sha256": "df7f2bb86b38d7743f96ff5299fce603e5734a4fd61fae60a26b802b541922d3"
+    },
+    "gliner2": {
+      "repo": "fastino-ai/GLiNER2",
+      "revision": "b86d35c02f2c1a4d9840ea50197bd1b6d13b031e",
+      "url": "https://codeload.github.com/fastino-ai/GLiNER2/tar.gz/b86d35c02f2c1a4d9840ea50197bd1b6d13b031e",
+      "sha256": "192597280c74454e6041344b444fccc0b4654322f6a4976a75d78ecfffe140db"
+    }
+  }
+}

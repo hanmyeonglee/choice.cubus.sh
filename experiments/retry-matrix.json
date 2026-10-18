@@ -1,0 +1,9 @@
+[
+  {"name": "base_fp16_expandable", "model": "base", "precision": "fp16", "allocator": "expandable_segments:True", "timeout_seconds": 180},
+  {"name": "base_nf4_fp16", "model": "base", "precision": "fp16", "quantization": "nf4", "allocator": "expandable_segments:True", "timeout_seconds": 180},
+  {"name": "large_fp32", "model": "large", "precision": "fp32", "timeout_seconds": 180},
+  {"name": "large_fp16", "model": "large", "precision": "fp16", "timeout_seconds": 180},
+  {"name": "large_nf4", "model": "large", "precision": "fp32", "quantization": "nf4", "timeout_seconds": 180},
+  {"name": "large_nf4_fp16", "model": "large", "precision": "fp16", "quantization": "nf4", "allocator": "expandable_segments:True", "timeout_seconds": 180},
+  {"name": "base_cpu_fallback_unicode", "model": "base", "precision": "fp32", "memory_mode": "cpu-fallback", "case_filter": "hard_limit_unicode_symbols", "timeout_seconds": 900}
+]

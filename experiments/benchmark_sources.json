@@ -1,0 +1,145 @@
+{
+  "description": "Pinned public text-only choice/noul benchmark inputs. Source licenses remain applicable.",
+  "files": [
+    {
+      "suite": "jevbench",
+      "revision": "609a664e81f46e03731600bd7bd9f1b7a61257c5",
+      "local_path": "jevbench/easy.jsonl",
+      "sha256": "231df3c2c8e88a1a8c137ebe85de96ba70fabd330849098ac7b3c52c70b7172b",
+      "url": "https://raw.githubusercontent.com/fstandhartinger/jevbench/609a664e81f46e03731600bd7bd9f1b7a61257c5/datasets/public/easy.jsonl"
+    },
+    {
+      "suite": "jevbench",
+      "revision": "609a664e81f46e03731600bd7bd9f1b7a61257c5",
+      "local_path": "jevbench/original.jsonl",
+      "sha256": "5c2414edb3006b8bfcb70fda433f0f9ca015759433849f8d3104328a1f7c4180",
+      "url": "https://raw.githubusercontent.com/fstandhartinger/jevbench/609a664e81f46e03731600bd7bd9f1b7a61257c5/datasets/public/original.jsonl"
+    },
+    {
+      "suite": "jevbench",
+      "revision": "609a664e81f46e03731600bd7bd9f1b7a61257c5",
+      "local_path": "jevbench/hard.jsonl",
+      "sha256": "89e9e6becb33ed88c1de7d42dcc87531b2fb64cfaef4e1986faf7c37b3f80ebb",
+      "url": "https://raw.githubusercontent.com/fstandhartinger/jevbench/609a664e81f46e03731600bd7bd9f1b7a61257c5/datasets/public/hard.jsonl"
+    },
+    {
+      "suite": "jeff",
+      "revision": "34b32f99a727c47b679adde33f4702a001e02979",
+      "local_path": "jeff/ag_news.jsonl",
+      "sha256": "9351d0d4bcc931fcfa7766d663198f51d21148f6b4ca15d0be7740cc64414aa0",
+      "url": "https://raw.githubusercontent.com/logan-markewich/jeff/34b32f99a727c47b679adde33f4702a001e02979/bench/data/ag_news.jsonl"
+    },
+    {
+      "suite": "jeff",
+      "revision": "34b32f99a727c47b679adde33f4702a001e02979",
+      "local_path": "jeff/emotion.jsonl",
+      "sha256": "268969aa88ac16e16d4803508e36b26ed786b5383a56f59eb4908133cbcb0ddc",
+      "url": "https://raw.githubusercontent.com/logan-markewich/jeff/34b32f99a727c47b679adde33f4702a001e02979/bench/data/emotion.jsonl"
+    },
+    {
+      "suite": "jeff",
+      "revision": "34b32f99a727c47b679adde33f4702a001e02979",
+      "local_path": "jeff/sms_spam.jsonl",
+      "sha256": "a1160440f8f41d3103f08563d9729d7759adf7197e9b7b7edb5d1fee8e0d7e20",
+      "url": "https://raw.githubusercontent.com/logan-markewich/jeff/34b32f99a727c47b679adde33f4702a001e02979/bench/data/sms_spam.jsonl"
+    },
+    {
+      "suite": "jeff",
+      "revision": "34b32f99a727c47b679adde33f4702a001e02979",
+      "local_path": "jeff/sst2.jsonl",
+      "sha256": "1ee9a2f348e01ce8893686ba6ee566f92726e9d0db4393113bbe5ec5a1fa3d5f",
+      "url": "https://raw.githubusercontent.com/logan-markewich/jeff/34b32f99a727c47b679adde33f4702a001e02979/bench/data/sst2.jsonl"
+    },
+    {
+      "suite": "jeff",
+      "revision": "34b32f99a727c47b679adde33f4702a001e02979",
+      "local_path": "jeff/irony.jsonl",
+      "sha256": "7baa41cc77090290120934313b9d1b73dc6b243f7fe32b3968ac7b4c7fa565b9",
+      "url": "https://raw.githubusercontent.com/logan-markewich/jeff/34b32f99a727c47b679adde33f4702a001e02979/bench/data/irony.jsonl"
+    },
+    {
+      "suite": "jeff",
+      "revision": "34b32f99a727c47b679adde33f4702a001e02979",
+      "local_path": "jeff/boolq.jsonl",
+      "sha256": "1654957b20324a23493d5704430b5fc815914837045e1998f901736c95748d61",
+      "url": "https://raw.githubusercontent.com/logan-markewich/jeff/34b32f99a727c47b679adde33f4702a001e02979/bench/data/boolq.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/aegis2.jsonl",
+      "sha256": "ee1f64f47cc1045e90c5d142938a2b90de0e5d757421ec281617b897655213c7",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/aegis2.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/aegis2_response.jsonl",
+      "sha256": "f917b7905af66b81b4cfdaa31023afddbcf91fd6e14539ca8a086712b15c5175",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/aegis2_response.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/atbench500.jsonl",
+      "sha256": "de990d158b7b0d16c48090ab34a2f1d0c5bcc697509149e63ec067d6aa51cf95",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/atbench500.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/banking77.jsonl",
+      "sha256": "116447a14d0c5c7db22e0d53cbf82278baf45f938a6c5e05bacfde5c47851af8",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/banking77.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/jailbreak_classification.jsonl",
+      "sha256": "2c2a7790f540733c7bfef45b630dc63ba33c64f5ec2693842ffaebe5e1a0839a",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/jailbreak_classification.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/medmcqa.jsonl",
+      "sha256": "67a10f492d5d5888810db65acb1fd65d5d5920a50ac39079e123ce3e0acc787f",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/medmcqa.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/medqa_usmle.jsonl",
+      "sha256": "76e1b08ed406c06ecbc9c01c3e9d6d339becc2a1df88bb70adb5dd251eb90856",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/medqa_usmle.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/mmlu_pro.jsonl",
+      "sha256": "ced07b20f653efc3a1ced606d4d65140f6cc425ed6efa8ff18ef041205fa36aa",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/mmlu_pro.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/prompt_injections.jsonl",
+      "sha256": "f0d7709f1b5a276ac35e34ad4eed0c0ad1a97a33b040515c38fd56ac18d400d3",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/prompt_injections.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/pubmedqa.jsonl",
+      "sha256": "2f6831bd0c6d442c63123063ffe0beb0662250ec7e4a971c6f3c64538f6d307c",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/pubmedqa.jsonl"
+    },
+    {
+      "suite": "leanmcp",
+      "revision": "ed50fe0381714d1c0273cbe03cece755b25d586b",
+      "local_path": "leanmcp/scienceqa_text.jsonl",
+      "sha256": "f09070ff6eaa3b984e38eba280a2447e27075f53b22dedb7e92d315cd13b698c",
+      "url": "https://huggingface.co/datasets/Leanmcp/jevbench/resolve/ed50fe0381714d1c0273cbe03cece755b25d586b/cases/scienceqa_text.jsonl"
+    }
+  ]
+}

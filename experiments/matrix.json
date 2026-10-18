@@ -1,0 +1,9 @@
+[
+  {"name": "base_fp32", "model": "base", "precision": "fp32", "timeout_seconds": 180},
+  {"name": "base_fp16", "model": "base", "precision": "fp16", "timeout_seconds": 180},
+  {"name": "large_fp32", "model": "large", "precision": "fp32", "timeout_seconds": 180},
+  {"name": "large_fp16", "model": "large", "precision": "fp16", "timeout_seconds": 180},
+  {"name": "base_nf4", "model": "base", "precision": "fp32", "quantization": "nf4", "timeout_seconds": 180},
+  {"name": "large_nf4", "model": "large", "precision": "fp32", "quantization": "nf4", "timeout_seconds": 180},
+  {"name": "base_cpu_fallback", "model": "base", "precision": "fp32", "memory_mode": "cpu-fallback", "timeout_seconds": 300}
+]

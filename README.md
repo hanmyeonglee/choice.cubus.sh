@@ -1,11 +1,11 @@
 # choice.cubus.sh
 
-A small FastAPI server that evaluates choice and noul questions by calling
-[GLiFormer base](https://huggingface.co/knowledgator/gliformer-base-v1) directly.
-It loads one model and processes one request at a time using FP32 and eager attention.
+A small FastAPI server that performs single-choice text classification by calling
+[GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide) (`fastino/GLiNER2.5-Decide`) directly.
+It loads one fixed model and processes one request at a time using FP16 on CUDA (or FP32 on CPU) with standard attention and a hard 1,024-token prepared input budget.
 
 ```text
-Client → cubus shared ingress → FastAPI :8000 → GLiFormer / GPU
+Client → cubus shared ingress → FastAPI :8000 → GLiNER2.5-Decide / GPU
 ```
 
 ## Repository layout
@@ -17,11 +17,12 @@ Client → cubus shared ingress → FastAPI :8000 → GLiFormer / GPU
 │   ├── __main__.py          # Server entry point
 │   ├── api.py               # Routes, authentication, and request handling
 │   ├── schemas.py           # Request/response schemas and input validation
-│   ├── model.py             # Model loading and device configuration
+│   ├── model.py             # Model loading, token budget check, and classification
 │   └── static/
 │       └── index.html       # Public homepage
 ├── scripts/
 │   └── download_model.py    # Build-time model download
+├── experiments/             # Isolated precision, format, and model benchmarks
 ├── Dockerfile
 ├── pyproject.toml
 ├── uv.lock
@@ -31,13 +32,16 @@ Client → cubus shared ingress → FastAPI :8000 → GLiFormer / GPU
 └── README.md
 ```
 
-The runtime entry point is `python -m app`, run from the repository root or the container's `/app` directory. Docker installs dependencies and downloads model files during the build.
+The runtime entry point is `python -m app`, run from the repository root or the container's `/app` directory. Docker installs locked dependencies and downloads model files during the build.
+
+For isolated precision, format ablation, and System One model comparisons, see
+[the experiment guide](experiments/README.md).
 
 ## API
 
 | Method / path | Purpose | Authentication |
 |---|---|---|
-| `POST /api/evaluate` | Evaluate choice and noul questions against state | Bearer key |
+| `POST /api/classify` | Classify text against 2–16 competing candidate labels | Bearer key |
 | `GET /api/healthz` | Readiness after model loading | None |
 | `GET /` | Introduction and request example | None |
 | `GET /docs` | Swagger UI documentation and interactive requests | None |
@@ -45,26 +49,21 @@ The runtime entry point is `python -m app`, run from the repository root or the 
 
 ```bash
 export API_KEY='your-api-key'
-curl --fail-with-body --max-time 30 http://127.0.0.1:8000/api/evaluate \
+curl --fail-with-body --max-time 30 http://127.0.0.1:8000/api/classify \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
-    "state": "I was charged twice for the same order.",
-    "questions": {
-      "department": {
-        "type": "choice",
-        "instructions": "Which team should handle this request?",
-        "criteria": {"billing": "Charges and invoices", "technical": "Technical issues"}
-      },
-      "duplicate_charge": {
-        "type": "noul",
-        "instructions": "The customer was charged twice for the same order."
-      }
+    "text": "I was charged twice for the same order.",
+    "task": "department",
+    "prompt": "Which team should handle this request?",
+    "labels": {
+      "billing": "Charges, refunds, and invoices",
+      "technical": "Website, login, or technical outages"
     }
   }'
 ```
 
-The public endpoint is `https://choice.cubus.sh/api/evaluate`. You can also enter the key itself in **Authorize** at `/docs` to send requests.
+The public endpoint is `https://choice.cubus.sh/api/classify`. You can also enter the key itself in **Authorize** at `/docs` to send requests.
 
 ### API keys
 
@@ -74,7 +73,7 @@ Configure one or more keys in the server's `API_KEYS` environment variable, sepa
 API_KEYS=replace-with-a-random-key,replace-with-another-random-key
 ```
 
-Replace every placeholder with a separately generated key. Each client sends only its own key as `Authorization: Bearer <key>`; the request examples use the client's `API_KEY` variable for that value. Any configured key grants the same access to `/api/evaluate`.
+Replace every placeholder with a separately generated key. Each client sends only its own key as `Authorization: Bearer <key>`; the request examples use the client's `API_KEY` variable for that value. Any configured key grants the same access to `/api/classify`.
 
 - Keys are generated and distributed manually; there are no accounts, login, or key issuance endpoints.
 - Surrounding whitespace and empty entries in the list are ignored. At least one real key is required, and placeholder keys beginning with `replace-with-` prevent startup.
@@ -83,86 +82,36 @@ Replace every placeholder with a separately generated key. Each client sends onl
 - Add, remove, or rotate keys by updating the server environment and recreating the container. Keys have no automatic expiration.
 - The homepage, docs, OpenAPI schema, and readiness endpoint remain public.
 
-### Response
+### Request and response schema
 
 Scores in this response example are illustrative:
 
 ```json
 {
-  "answers": {
-    "department": {
-      "type": "choice",
-      "choice": "billing",
-      "probabilities": {"billing": 0.8, "technical": 0.2}
-    },
-    "duplicate_charge": {"type": "noul", "noul": 0.9}
+  "choice": "billing",
+  "probabilities": {
+    "billing": 0.84,
+    "technical": 0.16
   }
 }
 ```
 
-- One model is fixed on the server. Requests have no `model` field.
-- `questions`: 1–4 per request. Question IDs associate answers with questions and are not passed to the model.
-- `instructions`: question or statement to evaluate, up to 320 characters.
-- `choice.criteria`: choice name → description string or null. Accepts 2–8 choices, with names up to 64 characters and descriptions up to 160 characters.
-- `noul`: accepts only `type` and `instructions`.
-- Only choice and noul questions are supported. Responses omit model, usage, and confidence fields.
-- Invalid keys return 401; invalid input returns 422.
+- One model (`fastino/GLiNER2.5-Decide`) is fixed on the server. Requests have no `model` field.
+- `text`: original prose, labeled sections, or a JSON object/array serialized as compact JSON up to 2,000 characters.
+- `labels`: 2–16 distinct candidate labels. Pass either:
+  - a list of label names (e.g., `["negative", "neutral", "positive"]`), or
+  - a dictionary mapping label names (1–64 chars) to optional descriptions (1–160 chars).
+- `task`: optional task or category group name (1–64 chars, defaults to `"decision"`).
+- `prompt`: optional question or classification instruction (1–320 chars).
+- For binary or yes/no questions, pass two meaningful competing labels (such as `["no", "yes"]` or `{"safe": "...", "unsafe": "..."}`) rather than a single statement.
+- Prepared sequences (text + task + prompt + labels and descriptions) exceeding 1,024 subword tokens are rejected with HTTP 422 rather than silently truncated.
+- Invalid keys return 401; invalid or oversized input returns 422.
 
-### State format
+### Writing effective classification requests
 
-**Use a string by default.** Original prose or labeled sections are passed to the model unchanged. Objects and arrays are also accepted for convenience and serialized as JSON text, preserving keys and values. No specific keys or schema are required. The serialized input is limited to 2,000 characters and is never truncated automatically.
-
-| Source material | Suggested starting point |
-|---|---|
-| Documents, emails, reviews | Original prose |
-| Entities with multiple attributes | Short `label: value` entries or shallow JSON |
-| Conversations | Text or arrays identifying speakers and message order |
-| Event or task histories | Chronological records and current status |
-
-For example, send the following text as a string state. Encode line breaks as `\n` in request JSON.
-
-```text
-Customer message:
-I was charged twice for the same order.
-
-Payment records:
-Two completed payments belong to order A123.
-
-Current status:
-No refund has been issued.
-```
-
-If the caller already has an object, it can be sent directly:
-
-```json
-{
-  "state": {
-    "customer_message": "I was charged twice for the same order.",
-    "payment_records": "Two completed payments belong to order A123.",
-    "current_status": "No refund has been issued."
-  }
-}
-```
-
-This example only shows state; an actual request also requires questions.
-
-- Put source material in `state`, and questions and evaluation criteria in each question's `instructions` and `criteria` fields under `questions`.
-- Identify who made each statement and distinguish claims from verified facts.
-- Preserve relationships between entities, times, units, and negation. Do not fill in unknown information by guessing.
-- Include only information relevant to the question and use consistent formats and labels for the same task.
-
-Objects and arrays also reach the model as text. JSON input does not provide a separate structural processing mechanism or guarantee better accuracy. Compare formats using identical facts and questions, and evaluate accuracy or F1 rather than score magnitude. [Related research on input formats](https://arxiv.org/abs/2411.10541) studies GPT models and does not directly establish GLiFormer's format preferences.
-
-GLiFormer's published evaluation results focus on English. If the primary input language is different, evaluate performance in that language separately. See the [model's evaluation scope](https://huggingface.co/knowledgator/gliformer-base-v1#training-and-intended-use).
-
-### Model calls and scores
-
-The model is called directly, with each question evaluated sequentially in a separate forward pass. More questions increase inference time.
-
-- **choice**: passes the question as the class group name and choice names and descriptions as class labels. Raw sigmoid scores are divided by their sum to produce `probabilities`; the highest-scoring choice is returned. An invalid total score returns 503.
-- **noul**: returns the raw sigmoid score from evaluating the `instructions` statement as a single class label.
-
-Neither value is calibrated as a probability of correctness. In particular, noul does not use a separately trained truth evaluation model. Callers handle action permissions and allow/block thresholds.
+- **Use competing candidates**: even for boolean gates, supply two contrasting options so the softmax classifier compares both hypotheses directly.
+- **Include descriptions when boundaries matter**: adding concise label descriptions improves domain-specific routing accuracy.
+- **Keep `text` focused**: pass the relevant document, transcript, or command context without unnecessary boilerplate. Objects and arrays are accepted for convenience and serialized as compact JSON text.
 
 ## Build and run
 
@@ -184,11 +133,12 @@ docker run --rm --name choice-api --gpus all \
 ```
 
 - `DEVICE`: defaults to `cuda`. Set to `cpu` explicitly for CPU execution. CUDA mode refuses to start if no GPU is available.
-- `MODEL_PATH`: defaults to `/opt/models/gliformer-base-v1`.
+- `PRECISION`: defaults to `fp16` on `cuda` and `fp32` on `cpu`.
+- `MODEL_PATH`: defaults to `/opt/models/gliner2.5-decide`.
 - Model weights and tokenizer files are included in the image; there are no external downloads at runtime.
 - uv is used only to install locked dependencies during the build. The runtime image does not include uv.
-- Uses PyTorch 2.7.1+cu126, GLiFormer 0.1.2, GLiNER 0.2.29, and Transformers 5.16.1. FastAPI, Uvicorn, and all dependencies are pinned in `uv.lock`.
-- Model revision: `590f9d3f577ea2f6d685aaec84b2d66b6db86b15`.
+- Uses PyTorch 2.7.1+cu126, GLiNER2 2.1.0, and Transformers 5.16.1. FastAPI, Uvicorn, and all dependencies are pinned in `uv.lock`.
+- Model revision: `9d1bfb848cd16d93ee56ccbc59cd92bf0f284d90`.
 
 ## cubus deployment contract
 
@@ -204,25 +154,3 @@ docker run --rm --name choice-api --gpus all \
 | Writable paths | `/tmp` and temporary/cache files in the container user's home |
 | Build outbound access | PyPI, PyTorch wheel repository, Hugging Face, and download CDNs |
 | Runtime outbound access | None required by the server; the browser fetches Swagger UI JS and CSS from a CDN |
-
-The central Compose configuration supplies build, GPU, network, and proxy settings. Shared ingress forwards every path unchanged to internal port 8000, preserving `/api`. No host port publication is required. The site and API share an origin, so no additional CORS configuration is needed.
-
-Uvicorn processes forwarded headers. The image default `FORWARDED_ALLOW_IPS=*` is intended for internal connections through shared ingress. It can be overridden at runtime with trusted proxy IPs or CIDRs.
-
-The central deployment can use the Python included in the image for its health check:
-
-```bash
-python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/healthz', timeout=3).close()"
-```
-
-Peak VRAM usage and response time on the GTX 1060 3GB still need to be measured on that server. Weight size alone does not guarantee total VRAM usage.
-
-## Verification results (2026-10-17)
-
-- Docker build and offline model loading succeeded.
-- Confirmed choice and noul GPU inference for string, object, and array state on an RTX 3060 Laptop without external network access.
-- Confirmed question ID matching, choice scores summing to 1, noul values in 0–1, and rejection of the model field and score questions.
-- Confirmed the homepage, docs, readiness, OpenAPI, invalid key responses (401), and input limit responses (422).
-- Confirmed that the runtime image contains neither Jeff nor Modal. Validation on the actual GTX 1060 3GB remains pending.
-
-These results precede the subsequent documentation, language, repository layout, and multiple API key edits; the image has not been rebuilt for those edits.

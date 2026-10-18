@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/huggingface /opt/venv/bin/python scri
 COPY app/__init__.py app/model.py ./app/
 # Loading offline during the build catches missing model/tokenizer files.
 RUN HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /opt/venv/bin/python -c \
-    "from app.model import load_model; load_model('/opt/models/gliformer-base-v1', 'cpu')"
+    "from app.model import load_model; load_model('/opt/models/gliner2.5-decide', 'cpu', 'fp32')"
 
 FROM python:3.12.12-slim-bookworm AS runtime
 
@@ -30,8 +30,9 @@ ENV PATH=/opt/venv/bin:$PATH \
     TOKENIZERS_PARALLELISM=false \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    MODEL_PATH=/opt/models/gliformer-base-v1 \
+    MODEL_PATH=/opt/models/gliner2.5-decide \
     DEVICE=cuda \
+    PRECISION=fp16 \
     OMP_NUM_THREADS=2
 
 RUN useradd --create-home --uid 10001 choice

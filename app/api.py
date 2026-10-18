@@ -1,7 +1,6 @@
-"""A small choice/noul API backed directly by GLiFormer."""
+"""A minimal single-choice classification API backed by GLiNER2.5-Decide."""
 
 import logging
-import math
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -14,17 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .model import load_model
-from .schemas import (
-    ChoiceAnswer,
-    ChoiceQuestion,
-    EvaluateRequest,
-    EvaluateResponse,
-    NoulAnswer,
-    NoulQuestion,
-    choice_labels,
-    state_text,
-)
+from .model import InputTooLongError, classify_text, load_model, resolve_dtype
+from .schemas import ClassifyRequest, ClassifyResponse, render_text
 
 
 def create_app():
@@ -37,34 +27,37 @@ def create_app():
         if not api_keys or any(key.startswith(b"replace-with-") for key in api_keys):
             raise RuntimeError("Set API_KEYS to one or more real Bearer keys before starting the server.")
         device = os.environ.get("DEVICE", "cuda")
+        precision = os.environ.get("PRECISION")
+        dtype = resolve_dtype(device, precision)
         app.state.model = load_model(
-            os.environ.get("MODEL_PATH", "/opt/models/gliformer-base-v1"), device
+            os.environ.get("MODEL_PATH", "/opt/models/gliner2.5-decide"),
+            device,
+            precision,
         )
-        logging.info("Model ready: device=%s dtype=float32 torch=%s", device, torch.__version__)
+        logging.info("Model ready: device=%s dtype=%s torch=%s", device, dtype, torch.__version__)
         yield
         del app.state.model
 
     app = FastAPI(
         title="Choice API",
-        version="0.1.0",
+        version="0.2.0",
         description=(
-            "Evaluate choice and noul questions against state. The model is fixed on the server.\n\n"
-            "### Writing state\n\n"
-            "Use a string containing the original prose or labeled sections by default. "
-            "Objects and arrays are also accepted; no specific keys or schema are required. "
-            "Strings are passed unchanged, while objects and arrays are serialized as JSON text. "
-            "The serialized input is limited to 2,000 characters and is never truncated automatically.\n\n"
-            "- Pass original documents and reviews, or short labels and values for multiple attributes.\n"
-            "- Identify speakers and message order in conversations, and times and current status in histories.\n"
-            "- Separate claims from verified facts and preserve times, units, and negation.\n"
-            "- Put source material in state, and questions and evaluation criteria in questions.\n\n"
-            "JSON does not guarantee better accuracy. "
-            "The model's published evaluation results focus on English.\n\n"
+            "Classify text against candidate labels using GLiNER2.5-Decide (`fastino/GLiNER2.5-Decide`). "
+            "The model is fixed on the server.\n\n"
+            "### Writing requests\n\n"
+            "Pass original prose or labeled sections in `text` (objects and arrays are also accepted and "
+            "serialized as compact JSON). Supply 2–16 competing candidate labels in `labels` as either a "
+            "list of strings or an object mapping each label to a short description. Optionally set `task` "
+            "(defaults to `decision`) and `prompt` (a question or classification instruction).\n\n"
+            "- For binary or yes/no questions, supply two meaningful competing labels (such as "
+            '`["no", "yes"]` or `{"safe": "Read-only inspection", "unsafe": "Modifies or deletes state"}`).\n'
+            "- Include concise label descriptions when category boundaries are domain-specific.\n"
+            "- Serialized `text` is limited to 2,000 characters, and the complete prepared sequence "
+            "(text, task, prompt, and labels) is limited to 1,024 subword tokens without silent truncation.\n\n"
             "### Results\n\n"
-            "Up to four questions are processed sequentially per request. "
-            "choice scores are normalized by their sum. noul is the raw sigmoid score from "
-            "evaluating the question statement as a single class. "
-            "Neither value is calibrated as a probability of correctness."
+            "`choice` is the highest-scoring candidate label, and `probabilities` contains the native "
+            "softmax score distribution across all candidate labels in request order. "
+            "Scores are not calibrated probabilities of correctness."
         ),
         lifespan=lifespan,
         swagger_ui_parameters={"defaultModelsExpandDepth": -1},
@@ -94,43 +87,29 @@ def create_app():
         return {"ok": True}
 
     @app.post(
-        "/api/evaluate",
-        response_model=EvaluateResponse,
+        "/api/classify",
+        response_model=ClassifyResponse,
         dependencies=[Depends(authenticate)],
-        tags=["Evaluation"],
-        summary="Evaluate choice and noul questions against state",
-        responses={401: {"description": "Missing or invalid Bearer key"}},
+        tags=["Classification"],
+        summary="Classify text against competing candidate labels",
+        responses={
+            401: {"description": "Missing or invalid Bearer key"},
+            422: {"description": "Invalid input or prepared sequence exceeds 1,024 tokens"},
+        },
     )
-    def evaluate(body: EvaluateRequest):
-        text = state_text(body.state)
-        answers = {}
-        # Separate forwards keep questions independent and GPU usage sequential.
+    def classify(body: ClassifyRequest):
+        text = render_text(body.text)
         with lock, torch.inference_mode():
-            for question_id, question in body.questions.items():
-                if isinstance(question, ChoiceQuestion):
-                    labels = choice_labels(question.criteria)
-                    classes = {question.instructions: labels}
-                else:
-                    labels = [question.instructions]
-                    classes = labels
-                predictions = app.state.model.classify(
-                    text, classes, threshold=-1.0, multi_label=True, batch_size=1
+            try:
+                choice, probabilities = classify_text(
+                    app.state.model,
+                    text=text,
+                    labels=body.labels,
+                    task=body.task,
+                    prompt=body.prompt,
                 )
-                scores = {item["class_name"]: item["score"] for item in predictions}
-                if isinstance(question, NoulQuestion):
-                    answers[question_id] = NoulAnswer(noul=scores[labels[0]])
-                else:
-                    total = sum(scores[label] for label in labels)
-                    if not math.isfinite(total) or total <= 0:
-                        raise HTTPException(503, "Model returned invalid choice scores")
-                    probabilities = {
-                        name: scores[label] / total
-                        for name, label in zip(question.criteria, labels)
-                    }
-                    answers[question_id] = ChoiceAnswer(
-                        choice=max(probabilities, key=probabilities.get),
-                        probabilities=probabilities,
-                    )
-        return EvaluateResponse(answers=answers)
+            except InputTooLongError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        return ClassifyResponse(choice=choice, probabilities=probabilities)
 
     return app

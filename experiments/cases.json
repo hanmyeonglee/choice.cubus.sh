@@ -1,0 +1,482 @@
+[
+  {
+    "name": "billing_prose",
+    "request": {
+      "state": "I was charged twice for the same order.",
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        },
+        "duplicate": {
+          "type": "noul",
+          "instructions": "The customer was charged twice for the same order."
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "billing"
+    },
+    "expected_noul": {
+      "duplicate": true
+    }
+  },
+  {
+    "name": "billing_object",
+    "request": {
+      "state": {
+        "message": "I was charged twice for the same order."
+      },
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        },
+        "duplicate": {
+          "type": "noul",
+          "instructions": "The customer was charged twice for the same order."
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "billing"
+    },
+    "expected_noul": {
+      "duplicate": true
+    }
+  },
+  {
+    "name": "billing_array",
+    "request": {
+      "state": [
+        {
+          "message": "I was charged twice for the same order."
+        }
+      ],
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        },
+        "duplicate": {
+          "type": "noul",
+          "instructions": "The customer was charged twice for the same order."
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "billing"
+    },
+    "expected_noul": {
+      "duplicate": true
+    }
+  },
+  {
+    "name": "technical_issue",
+    "request": {
+      "state": "The application crashes every time I open Settings. Please help fix this software error.",
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        },
+        "refund": {
+          "type": "noul",
+          "instructions": "The customer requests a refund."
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "technical"
+    },
+    "expected_noul": {
+      "refund": false
+    }
+  },
+  {
+    "name": "shipping_delay",
+    "request": {
+      "state": "My package has not arrived. Tracking says the shipment is delayed at the distribution center.",
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        },
+        "late": {
+          "type": "noul",
+          "instructions": "The package delivery is delayed."
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "shipping"
+    },
+    "expected_noul": {
+      "late": true
+    }
+  },
+  {
+    "name": "explicit_negation",
+    "request": {
+      "state": "The customer was not charged twice. The payment records show exactly one completed payment for this order.",
+      "questions": {
+        "duplicate": {
+          "type": "noul",
+          "instructions": "The customer was charged twice for the same order."
+        }
+      }
+    },
+    "expected_choices": {},
+    "expected_noul": {
+      "duplicate": false
+    }
+  },
+  {
+    "name": "conversation_revision",
+    "request": {
+      "state": [
+        {
+          "speaker": "customer",
+          "message": "Please cancel my subscription."
+        },
+        {
+          "speaker": "agent",
+          "message": "Would you like to keep it if we fix the problem?"
+        },
+        {
+          "speaker": "customer",
+          "message": "Yes, keep my subscription active. Do not cancel it."
+        }
+      ],
+      "questions": {
+        "action": {
+          "type": "choice",
+          "instructions": "What does the customer currently want?",
+          "criteria": {
+            "keep_active": "Keep the subscription active",
+            "cancel": "Cancel the subscription"
+          }
+        },
+        "cancel_now": {
+          "type": "noul",
+          "instructions": "The customer currently wants the subscription canceled."
+        }
+      }
+    },
+    "expected_choices": {
+      "action": "keep_active"
+    },
+    "expected_noul": {
+      "cancel_now": false
+    }
+  },
+  {
+    "name": "ambiguous_request",
+    "request": {
+      "state": "I need help with an order.",
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        }
+      }
+    },
+    "expected_choices": {},
+    "expected_noul": {}
+  },
+  {
+    "name": "state_2000_chars",
+    "request": {
+      "state": "This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is backgrouThe package has not arrived. Tracking confirms that the shipment is delayed.",
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors and technical issues",
+            "shipping": "Delivery and package tracking"
+          }
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "shipping"
+    },
+    "expected_noul": {}
+  },
+  {
+    "name": "four_questions_eight_choices",
+    "request": {
+      "state": "Payment records confirm that the customer was charged twice for order A123. No refund has been issued.",
+      "questions": {
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this request?",
+          "criteria": {
+            "billing": "Charges and invoices",
+            "technical": "Software errors",
+            "shipping": "Package delivery",
+            "sales": "Buying products",
+            "account": "Account access",
+            "feedback": "Product feedback",
+            "legal": "Legal requests",
+            "other": "Other requests"
+          }
+        },
+        "duplicate": {
+          "type": "noul",
+          "instructions": "The customer was charged twice for the same order."
+        },
+        "refund": {
+          "type": "noul",
+          "instructions": "The customer has already received a refund."
+        },
+        "status": {
+          "type": "choice",
+          "instructions": "What is the payment status?",
+          "criteria": {
+            "duplicate_payment": "The same order was charged twice",
+            "single_payment": "The order was charged once",
+            "refunded": "The payment was refunded",
+            "unpaid": "No payment was made",
+            "failed": "Payment failed",
+            "pending": "Payment is pending",
+            "disputed": "A dispute was opened",
+            "unknown": "Payment status is unknown"
+          }
+        }
+      }
+    },
+    "expected_choices": {
+      "department": "billing",
+      "status": "duplicate_payment"
+    },
+    "expected_noul": {
+      "duplicate": true,
+      "refund": false
+    }
+  },
+  {
+    "name": "hard_limit_readable",
+    "request": {
+      "state": "This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is background information from the support log. This is backgrouThe package has not arrived. Tracking confirms that the shipment is delayed.",
+      "questions": {
+        "category_1": {
+          "type": "choice",
+          "instructions": "Question 1: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        },
+        "category_2": {
+          "type": "choice",
+          "instructions": "Question 2: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        },
+        "category_3": {
+          "type": "choice",
+          "instructions": "Question 3: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        },
+        "category_4": {
+          "type": "choice",
+          "instructions": "Question 4: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "hard_limit_dense_punctuation",
+    "request": {
+      "state": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c",
+      "questions": {
+        "category_1": {
+          "type": "choice",
+          "instructions": "Category 1: a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! ",
+          "criteria": {
+            "category_0_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_1_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_2_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_3_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_4_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_5_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_6_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_7_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16"
+          }
+        },
+        "category_2": {
+          "type": "choice",
+          "instructions": "Category 2: a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! ",
+          "criteria": {
+            "category_0_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_1_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_2_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_3_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_4_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_5_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_6_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_7_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16"
+          }
+        },
+        "category_3": {
+          "type": "choice",
+          "instructions": "Category 3: a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! ",
+          "criteria": {
+            "category_0_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_1_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_2_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_3_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_4_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_5_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_6_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_7_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16"
+          }
+        },
+        "category_4": {
+          "type": "choice",
+          "instructions": "Category 4: a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! ",
+          "criteria": {
+            "category_0_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_1_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_2_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_3_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_4_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_5_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_6_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16",
+            "category_7_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4_b2_c8_a9_f4": "a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16|3d_02! a9-f4 / b2-c8; 7e:16"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "hard_limit_unicode_symbols",
+    "request": {
+      "state": "\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f\ud83d\ude10\ud83d\ude11\ud83d\ude12\ud83d\ude13\ud83d\ude14\ud83d\ude15\ud83d\ude16\ud83d\ude17\ud83d\ude18\ud83d\ude19\ud83d\ude1a\ud83d\ude1b\ud83d\ude1c\ud83d\ude1d\ud83d\ude1e\ud83d\ude1f\ud83d\ude20\ud83d\ude21\ud83d\ude22\ud83d\ude23\ud83d\ude24\ud83d\ude25\ud83d\ude26\ud83d\ude27\ud83d\ude28\ud83d\ude29\ud83d\ude2a\ud83d\ude2b\ud83d\ude2c\ud83d\ude2d\ud83d\ude2e\ud83d\ude2f\ud83d\ude30\ud83d\ude31\ud83d\ude32\ud83d\ude33\ud83d\ude34\ud83d\ude35\ud83d\ude36\ud83d\ude37\ud83d\ude38\ud83d\ude39\ud83d\ude3a\ud83d\ude3b\ud83d\ude3c\ud83d\ude3d\ud83d\ude3e\ud83d\ude3f\ud83d\ude00\ud83d\ude01\ud83d\ude02\ud83d\ude03\ud83d\ude04\ud83d\ude05\ud83d\ude06\ud83d\ude07\ud83d\ude08\ud83d\ude09\ud83d\ude0a\ud83d\ude0b\ud83d\ude0c\ud83d\ude0d\ud83d\ude0e\ud83d\ude0f",
+      "questions": {
+        "category_1": {
+          "type": "choice",
+          "instructions": "Question 1: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        },
+        "category_2": {
+          "type": "choice",
+          "instructions": "Question 2: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        },
+        "category_3": {
+          "type": "choice",
+          "instructions": "Question 3: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        },
+        "category_4": {
+          "type": "choice",
+          "instructions": "Question 4: Which support category best matches the request? Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the source material and choose the most relevant category. Use the",
+          "criteria": {
+            "billing_category_category_category_category_category_category_ca": "billing category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "technical_category_category_category_category_category_category_": "technical category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. ",
+            "shipping_category_category_category_category_category_category_c": "shipping category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "sales_category_category_category_category_category_category_cate": "sales category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "account_category_category_category_category_category_category_ca": "account category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Us",
+            "feedback_category_category_category_category_category_category_c": "feedback category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. U",
+            "legal_category_category_category_category_category_category_cate": "legal category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use ",
+            "other_category_category_category_category_category_category_cate": "other category. Use the source material and evaluate this support request.  category. Use the source material and evaluate this support request.  category. Use "
+          }
+        }
+      }
+    }
+  }
+]

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Evaluate choice and noul questions against free-form state with Choice API. Explore request examples and API documentation.">
-  <title>Choice — choice · noul API</title>
+  <meta name="description" content="Classify text against candidate labels with Choice API backed by GLiNER2.5-Decide. Explore request examples and API documentation.">
+  <title>Choice — GLiNER2.5-Decide Classification API</title>
   <style>
     :root { color-scheme: dark; --bg: #111512; --panel: #191e1a; --line: #333c35; --text: #edf1e9; --muted: #a4afa6; --accent: #c7ef92; }
     * { box-sizing: border-box; }
@@ -62,77 +62,70 @@
   <div class="wrap">
     <header>
       <a class="brand" href="/" aria-label="Choice home">choice<span>.</span></a>
-      <nav aria-label="Main navigation"><a href="#state-guide">Writing state</a><a href="/docs">API docs ↗</a></nav>
+      <nav aria-label="Main navigation"><a href="#request-guide">Writing requests</a><a href="/docs">API docs ↗</a></nav>
     </header>
     <main>
       <div class="hero">
-        <div class="eyebrow">STATE IN. ANSWERS OUT.</div>
+        <div class="eyebrow">TEXT IN. DECISION OUT.</div>
         <h1>Send context.<br>Get decisions.</h1>
-        <p class="intro">Put your source material in state and what you want to evaluate in questions. Combine choice and yes/no evaluations in a single request.</p>
+        <p class="intro">Classify text against competing candidate labels with GLiNER2.5-Decide. Supply bare label lists or descriptive candidate definitions with an optional question prompt.</p>
         <div class="actions"><a class="button" href="/docs">Open API docs →</a><a class="secondary" href="#quickstart">View request example</a></div>
-        <div class="endpoint"><span class="method">POST</span><code>/api/evaluate</code><span class="auth">Bearer authentication</span></div>
+        <div class="endpoint"><span class="method">POST</span><code>/api/classify</code><span class="auth">Bearer authentication</span></div>
       </div>
       <div class="types">
-        <article class="type"><h2>01 / state</h2><p>Send original text or labeled sections. Objects and arrays are also accepted.</p></article>
-        <article class="type"><h2>02 / choice</h2><p>Get one choice and a distribution of scores that sum to 1.</p></article>
-        <article class="type"><h2>03 / noul</h2><p>Get a score from 0 to 1 for how well a question or statement applies.</p></article>
+        <article class="type"><h2>01 / text</h2><p>Send original prose, labeled sections, or structured JSON objects up to 2,000 characters.</p></article>
+        <article class="type"><h2>02 / labels</h2><p>Pass 2–16 competing labels as a list of names or a dictionary with concise descriptions.</p></article>
+        <article class="type"><h2>03 / choice</h2><p>Receive the winning label and native softmax scores across all candidates.</p></article>
       </div>
       <section id="quickstart">
         <h2>Your first request</h2>
         <p>Set <code>BASE_URL</code> to your service URL and <code>API_KEY</code> to your access key. The server accepts any key in its <code>API_KEYS</code> list. Send one key per request. You can also send requests using the Authorize button in the docs.</p>
-        <pre><code>curl "$BASE_URL/api/evaluate" \
+        <pre><code>curl "$BASE_URL/api/classify" \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
-    "state": "I was charged twice for the same order.",
-    "questions": {
-      "department": {
-        "type": "choice",
-        "instructions": "Which team should handle this request?",
-        "criteria": {
-          "billing": "Charges and invoices",
-          "technical": "Technical issues"
-        }
-      },
-      "duplicate_charge": {
-        "type": "noul",
-        "instructions": "The customer was charged twice for the same order."
-      }
+    "text": "I was charged twice for the same order.",
+    "task": "department",
+    "prompt": "Which team should handle this request?",
+    "labels": {
+      "billing": "Charges, refunds, and invoices",
+      "technical": "Website, login, or technical outages"
     }
   }'</code></pre>
-        <p class="note">Results are returned under <code>answers</code>, keyed by question ID. Choice <code>probabilities</code> are normalized classification scores; <code>noul</code> is the raw classification score for a single statement.</p>
+        <p class="note">Returns <code>choice</code> (the top-scoring candidate) and <code>probabilities</code> (native softmax scores across all candidate labels in request order).</p>
       </section>
-      <section id="state-guide" aria-labelledby="state-heading">
-        <h2 id="state-heading">Free-form state, clear context</h2>
-        <p>Use a string by default. Send documents and reviews as original text, and add short labels when combining different kinds of information. No specific keys or schema are required.</p>
-        <pre><code>Customer message:
-I was charged twice for the same order.
-
-Payment records:
-Two completed payments belong to order A123.
-
-Current status:
-No refund has been issued.</code></pre>
+      <section id="request-guide" aria-labelledby="guide-heading">
+        <h2 id="guide-heading">Competing candidates, clear context</h2>
+        <p>Use a string by default for <code>text</code>, and define competing candidate labels in <code>labels</code>. For yes/no or safety gates, provide two meaningful competing options rather than a single statement.</p>
+        <pre><code>{
+  "text": "git status -s &amp;&amp; pytest -q",
+  "task": "command_safety",
+  "prompt": "Classify the risk category of running this command in a developer workspace.",
+  "labels": {
+    "read_or_test": "Inspects status or runs local tests without destructive side effects",
+    "state_mutation": "Edits source files, installs packages, or commits changes",
+    "destructive": "Deletes data, resets git history, or modifies system configuration"
+  }
+}</code></pre>
         <ul class="guidelines">
-          <li>Identify speakers and message order in conversations, and times and current status in histories.</li>
-          <li>Separate claims from verified facts, and preserve relationships, units, and negation.</li>
-          <li>Put source material in <code>state</code>, and questions and evaluation criteria in <code>questions</code>.</li>
+          <li>Pass bare label lists (e.g. <code>["negative", "neutral", "positive"]</code>) when label names are self-explanatory.</li>
+          <li>Add concise label descriptions and an optional <code>prompt</code> when domain boundaries need disambiguation.</li>
+          <li>Keep complete prepared inputs within 1,024 subword tokens; oversized inputs return 422 instead of truncating silently.</li>
         </ul>
-        <p class="note">Objects and arrays are serialized as JSON text. JSON does not guarantee better accuracy. Encode line breaks as <code>\n</code> in request JSON. The model's published evaluation results focus on English.</p>
       </section>
       <section aria-labelledby="endpoints">
         <h2 id="endpoints">API endpoints</h2>
         <div class="table-wrap"><table>
           <thead><tr><th>Method</th><th>Path</th><th>Purpose</th><th>Authentication</th></tr></thead>
           <tbody>
-            <tr><td>POST</td><td><code>/api/evaluate</code></td><td>choice · noul evaluation</td><td>Bearer key</td></tr>
+            <tr><td>POST</td><td><code>/api/classify</code></td><td>Single-choice classification</td><td>Bearer key</td></tr>
             <tr><td>GET</td><td><code>/api/healthz</code></td><td>Readiness</td><td>None</td></tr>
           </tbody>
         </table></div>
-        <p class="note">State is limited to 2,000 characters after serialization, with up to 4 questions per request. Scores are not calibrated probabilities of correctness. Callers define their own action thresholds.</p>
+        <p class="note">Text is limited to 2,000 characters after serialization and 1,024 prepared subword tokens. Scores are not calibrated probabilities of correctness.</p>
       </section>
     </main>
-    <footer><span>Choice · GLiFormer evaluation API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>
+    <footer><span>Choice · GLiNER2.5-Decide classification API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>
   </div>
 </body>
 </html>
