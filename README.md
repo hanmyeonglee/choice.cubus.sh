@@ -18,6 +18,7 @@ Client → cubus shared ingress → FastAPI :8000 → GLiNER2.5-Decide / GPU
 │   ├── api.py               # Routes, authentication, and request handling
 │   ├── schemas.py           # Request/response schemas and input validation
 │   ├── model.py             # Model loading, token budget check, and classification
+│   ├── worker.py            # On-demand inference subprocess and idle GPU eviction
 │   └── static/
 │       └── index.html       # Public homepage
 ├── scripts/
@@ -42,7 +43,7 @@ For isolated precision, format ablation, and System One model comparisons, see
 | Method / path | Purpose | Authentication |
 |---|---|---|
 | `POST /api/classify` | Classify text against 2–16 competing candidate labels | Bearer key |
-| `GET /api/healthz` | Readiness after model loading | None |
+| `GET /api/healthz` | Server readiness and model residency (`model_loaded`) | None |
 | `GET /` | Introduction and request example | None |
 | `GET /docs` | Swagger UI documentation and interactive requests | None |
 | `GET /openapi.json` | OpenAPI schema | None |
@@ -134,6 +135,7 @@ docker run --rm --name choice-api --gpus all \
 
 - `DEVICE`: defaults to `cuda`. Set to `cpu` explicitly for CPU execution. CUDA mode refuses to start if no GPU is available.
 - `PRECISION`: defaults to `fp16` on `cuda` and `fp32` on `cpu`.
+- `IDLE_TIMEOUT_SECONDS`: defaults to `180` (3 minutes). The model loads in a dedicated worker subprocess on the first `/api/classify` request and terminates after `IDLE_TIMEOUT_SECONDS` of inactivity, releasing 100% of GPU VRAM (including the CUDA context). Set to `0` to pre-load on startup and keep the model resident permanently.
 - `MODEL_PATH`: defaults to `/opt/models/gliner2.5-decide`.
 - Model weights and tokenizer files are included in the image; there are no external downloads at runtime.
 - uv is used only to install locked dependencies during the build. The runtime image does not include uv.

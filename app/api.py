@@ -5,22 +5,19 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from threading import Lock
 from typing import Annotated
 
-import torch
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .model import InputTooLongError, classify_text, load_model, resolve_dtype
 from .schemas import ClassifyRequest, ClassifyResponse, render_text
+from .worker import ModelWorker, WorkerInputTooLongError
 
 
 def create_app():
     configured_keys = os.environ.get("API_KEYS", os.environ.get("API_KEY", ""))
     api_keys = tuple(key.strip().encode() for key in configured_keys.split(",") if key.strip())
-    lock = Lock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -28,15 +25,27 @@ def create_app():
             raise RuntimeError("Set API_KEYS to one or more real Bearer keys before starting the server.")
         device = os.environ.get("DEVICE", "cuda")
         precision = os.environ.get("PRECISION")
-        dtype = resolve_dtype(device, precision)
-        app.state.model = load_model(
+        idle_timeout = float(os.environ.get("IDLE_TIMEOUT_SECONDS", "180"))
+        worker = ModelWorker(
             os.environ.get("MODEL_PATH", "/opt/models/gliner2.5-decide"),
-            device,
-            precision,
+            device=device,
+            precision=precision,
+            idle_timeout=idle_timeout,
         )
-        logging.info("Model ready: device=%s dtype=%s torch=%s", device, dtype, torch.__version__)
-        yield
-        del app.state.model
+        if idle_timeout == 0:
+            worker.start()
+        else:
+            logging.info(
+                "Model worker configured in on-demand idle mode: device=%s precision=%s idle_timeout=%.0fs",
+                device,
+                precision or "auto",
+                idle_timeout,
+            )
+        app.state.worker = worker
+        try:
+            yield
+        finally:
+            worker.close()
 
     app = FastAPI(
         title="Choice API",
@@ -82,9 +91,9 @@ def create_app():
     async def homepage():
         return FileResponse(Path(__file__).with_name("static") / "index.html")
 
-    @app.get("/api/healthz", tags=["Server"], summary="Readiness after model loading")
+    @app.get("/api/healthz", tags=["Server"], summary="Server readiness and model residency")
     async def healthz():
-        return {"ok": True}
+        return {"ok": True, "model_loaded": app.state.worker.is_loaded()}
 
     @app.post(
         "/api/classify",
@@ -99,17 +108,15 @@ def create_app():
     )
     def classify(body: ClassifyRequest):
         text = render_text(body.text)
-        with lock, torch.inference_mode():
-            try:
-                choice, probabilities = classify_text(
-                    app.state.model,
-                    text=text,
-                    labels=body.labels,
-                    task=body.task,
-                    prompt=body.prompt,
-                )
-            except InputTooLongError as exc:
-                raise HTTPException(422, str(exc)) from exc
+        try:
+            choice, probabilities = app.state.worker.classify(
+                text=text,
+                labels=body.labels,
+                task=body.task,
+                prompt=body.prompt,
+            )
+        except WorkerInputTooLongError as exc:
+            raise HTTPException(422, str(exc)) from exc
         return ClassifyResponse(choice=choice, probabilities=probabilities)
 
     return app

@@ -33,6 +33,7 @@ ENV PATH=/opt/venv/bin:$PATH \
     MODEL_PATH=/opt/models/gliner2.5-decide \
     DEVICE=cuda \
     PRECISION=fp16 \
+    IDLE_TIMEOUT_SECONDS=180 \
     OMP_NUM_THREADS=2
 
 RUN useradd --create-home --uid 10001 choice
