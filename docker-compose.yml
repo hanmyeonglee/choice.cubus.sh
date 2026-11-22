@@ -1,0 +1,7 @@
+services:
+  choice:
+    extends:
+      file: compose.service.yml
+      service: choice
+    ports:
+      - "127.0.0.1:8000:8000"

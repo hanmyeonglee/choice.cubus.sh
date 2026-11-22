@@ -25,6 +25,8 @@ Client → cubus shared ingress → FastAPI :8000 → GLiNER2.5-Decide / GPU
 │   └── download_model.py    # Build-time model download
 ├── experiments/             # Isolated precision, format, and model benchmarks
 ├── Dockerfile
+├── compose.service.yml      # Shared service definition extended by cubus.sh
+├── docker-compose.yml       # Local loopback wrapper (127.0.0.1:8000)
 ├── pyproject.toml
 ├── uv.lock
 ├── .env.example
@@ -147,6 +149,7 @@ docker run --rm --name choice-api --gpus all \
 | Setting | Value |
 |---|---|
 | Dockerfile / build context | Root `Dockerfile` / repository root |
+| Service compose | `compose.service.yml` (`choice` service, extended by `cubus.sh`) |
 | Listener / intended hostname | `0.0.0.0:8000` / `choice.cubus.sh` |
 | Internal network | Shared `web` |
 | Proxy metadata | `VIRTUAL_HOST=choice.cubus.sh`, `VIRTUAL_PORT=8000` |
