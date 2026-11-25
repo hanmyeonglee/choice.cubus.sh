@@ -3,6 +3,7 @@
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -11,45 +12,66 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .runtime import APP_VERSION, ChoiceRuntime
 from .schemas import ClassifyRequest, ClassifyResponse, render_text
 from .worker import ModelWorker, WorkerInputTooLongError
 
 
-def create_app():
-    configured_keys = os.environ.get("API_KEYS", os.environ.get("API_KEY", ""))
-    api_keys = tuple(key.strip().encode() for key in configured_keys.split(",") if key.strip())
+def _parse_api_keys(environ: Mapping[str, str] | None = None) -> tuple[bytes, ...]:
+    env = os.environ if environ is None else environ
+    configured_keys = env.get("API_KEYS", env.get("API_KEY", ""))
+    return tuple(key.strip().encode() for key in configured_keys.split(",") if key.strip())
+
+
+def validate_api_keys(api_keys: tuple[bytes, ...]) -> tuple[bytes, ...]:
+    """Ensure at least one non-placeholder Bearer API key is configured."""
+    if not api_keys or any(key.startswith(b"replace-with-") for key in api_keys):
+        raise RuntimeError("Set API_KEYS to one or more real Bearer keys before starting the server.")
+    return api_keys
+
+
+def load_api_keys(environ: Mapping[str, str] | None = None) -> tuple[bytes, ...]:
+    """Read and validate non-placeholder Bearer API keys from environment variables."""
+    return validate_api_keys(_parse_api_keys(environ))
+
+
+def create_app(runtime: ChoiceRuntime | None = None):
+    active_runtime = ChoiceRuntime.from_env() if runtime is None else runtime
+    api_keys = _parse_api_keys()
 
     @asynccontextmanager
     async def lifespan(app):
-        if not api_keys or any(key.startswith(b"replace-with-") for key in api_keys):
-            raise RuntimeError("Set API_KEYS to one or more real Bearer keys before starting the server.")
+        validate_api_keys(api_keys)
         device = os.environ.get("DEVICE", "cuda")
         precision = os.environ.get("PRECISION")
-        idle_timeout = float(os.environ.get("IDLE_TIMEOUT_SECONDS", "180"))
+        idle_timeout = active_runtime.initial_worker_idle_timeout()
         worker = ModelWorker(
             os.environ.get("MODEL_PATH", "/opt/models/gliner2.5-decide"),
             device=device,
             precision=precision,
             idle_timeout=idle_timeout,
         )
-        if idle_timeout == 0:
+        active_runtime.attach_worker(worker)
+        if worker.idle_timeout == 0:
             worker.start()
         else:
             logging.info(
                 "Model worker configured in on-demand idle mode: device=%s precision=%s idle_timeout=%.0fs",
                 device,
                 precision or "auto",
-                idle_timeout,
+                worker.idle_timeout,
             )
         app.state.worker = worker
+        app.state.runtime = active_runtime
         try:
             yield
         finally:
+            active_runtime.detach_worker()
             worker.close()
 
     app = FastAPI(
         title="Choice API",
-        version="0.2.0",
+        version=APP_VERSION,
         description=(
             "Classify text against candidate labels using GLiNER2.5-Decide (`fastino/GLiNER2.5-Decide`). "
             "The model is fixed on the server.\n\n"
@@ -71,6 +93,7 @@ def create_app():
         lifespan=lifespan,
         swagger_ui_parameters={"defaultModelsExpandDepth": -1},
     )
+    app.state.runtime = active_runtime
     bearer = HTTPBearer(
         auto_error=False,
         scheme_name="BearerKey",
@@ -87,6 +110,10 @@ def create_app():
         if not valid_key:
             raise HTTPException(401, "Invalid or missing Bearer key", headers={"WWW-Authenticate": "Bearer"})
 
+    def require_accepting_requests():
+        if not active_runtime.snapshot().accept_requests:
+            raise HTTPException(503, "Service is temporarily paused for maintenance.")
+
     @app.get("/", include_in_schema=False)
     async def homepage():
         return FileResponse(Path(__file__).with_name("static") / "index.html")
@@ -98,16 +125,30 @@ def create_app():
     @app.post(
         "/api/classify",
         response_model=ClassifyResponse,
-        dependencies=[Depends(authenticate)],
+        dependencies=[Depends(authenticate), Depends(require_accepting_requests)],
         tags=["Classification"],
         summary="Classify text against competing candidate labels",
         responses={
             401: {"description": "Missing or invalid Bearer key"},
             422: {"description": "Invalid input or prepared sequence exceeds 1,024 tokens"},
+            503: {"description": "Service is temporarily paused for maintenance"},
         },
     )
     def classify(body: ClassifyRequest):
+        settings = active_runtime.snapshot()
+        if not settings.accept_requests:
+            raise HTTPException(503, "Service is temporarily paused for maintenance.")
+        if len(body.labels) > settings.max_labels:
+            raise HTTPException(
+                422,
+                f"labels must contain at most {settings.max_labels} candidate labels.",
+            )
         text = render_text(body.text)
+        if len(text) > settings.max_text_chars:
+            raise HTTPException(
+                422,
+                f"text must not exceed {settings.max_text_chars:,} characters after serialization.",
+            )
         try:
             choice, probabilities = app.state.worker.classify(
                 text=text,

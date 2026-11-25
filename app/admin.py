@@ -1,0 +1,442 @@
+"""Internal-only Admin API (:9090) for choice.cubus.sh."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+import ctypes
+from dataclasses import dataclass, field
+import hmac
+import ipaddress
+import json
+import os
+import socket
+import sys
+from typing import Any
+
+import anyio
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .runtime import APP_VERSION, MAIN_PORT, SETTINGS_SCHEMA, ChoiceRuntime, SettingsValidationError
+
+
+DEFAULT_ADMIN_PORT = 9090
+MIN_ADMIN_TOKEN_LEN = 16
+MAX_ADMIN_BODY_BYTES = 16 << 10  # 16 KiB
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+class _SockAddr(ctypes.Structure):
+    _fields_ = [
+        ("sa_family", ctypes.c_ushort),
+        ("sa_data", ctypes.c_char * 14),
+    ]
+
+
+class _SockAddrIn(ctypes.Structure):
+    _fields_ = [
+        ("sin_family", ctypes.c_ushort),
+        ("sin_port", ctypes.c_uint16),
+        ("sin_addr", ctypes.c_ubyte * 4),
+        ("sin_zero", ctypes.c_char * 8),
+    ]
+
+
+class _SockAddrIn6(ctypes.Structure):
+    _fields_ = [
+        ("sin6_family", ctypes.c_ushort),
+        ("sin6_port", ctypes.c_uint16),
+        ("sin6_flowinfo", ctypes.c_uint32),
+        ("sin6_addr", ctypes.c_ubyte * 16),
+        ("sin6_scope_id", ctypes.c_uint32),
+    ]
+
+
+class _IfAddrs(ctypes.Structure):
+    pass
+
+
+_IfAddrs._fields_ = [
+    ("ifa_next", ctypes.POINTER(_IfAddrs)),
+    ("ifa_name", ctypes.c_char_p),
+    ("ifa_flags", ctypes.c_uint),
+    ("ifa_addr", ctypes.POINTER(_SockAddr)),
+    ("ifa_netmask", ctypes.POINTER(_SockAddr)),
+    ("ifa_ifu", ctypes.c_void_p),
+    ("ifa_data", ctypes.c_void_p),
+]
+
+
+def _load_libc() -> ctypes.CDLL:
+    for lib_name in ("libc.so.6", None):
+        try:
+            lib = ctypes.CDLL(lib_name, use_errno=True)
+        except OSError:
+            continue
+        if hasattr(lib, "getifaddrs") and hasattr(lib, "freeifaddrs"):
+            lib.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(_IfAddrs))]
+            lib.getifaddrs.restype = ctypes.c_int
+            lib.freeifaddrs.argtypes = [ctypes.POINTER(_IfAddrs)]
+            lib.freeifaddrs.restype = None
+            return lib
+    raise RuntimeError("Unable to load libc getifaddrs/freeifaddrs for ADMIN_BIND_CIDR resolution.")
+
+
+def _unmap_ip(addr: IPAddress) -> IPAddress:
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def list_interface_ips() -> list[IPAddress]:
+    """Enumerate assigned local interface IP addresses using POSIX/Linux getifaddrs."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError(f"ADMIN_BIND_CIDR interface resolution is supported on Linux only (got {sys.platform!r}).")
+
+    libc = _load_libc()
+    head = ctypes.POINTER(_IfAddrs)()
+    if libc.getifaddrs(ctypes.byref(head)) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+    addrs: list[IPAddress] = []
+    try:
+        cur = head
+        while cur:
+            ifa = cur.contents
+            if ifa.ifa_addr:
+                family = ifa.ifa_addr.contents.sa_family
+                if family == socket.AF_INET:
+                    sa4 = ctypes.cast(ifa.ifa_addr, ctypes.POINTER(_SockAddrIn)).contents
+                    ip: IPAddress = ipaddress.IPv4Address(bytes(sa4.sin_addr))
+                    if not ip.is_unspecified:
+                        addrs.append(ip)
+                elif family == socket.AF_INET6:
+                    sa6 = ctypes.cast(ifa.ifa_addr, ctypes.POINTER(_SockAddrIn6)).contents
+                    ip6 = _unmap_ip(ipaddress.IPv6Address(bytes(sa6.sin6_addr)))
+                    if not ip6.is_unspecified and not (isinstance(ip6, ipaddress.IPv6Address) and ip6.is_link_local):
+                        addrs.append(ip6)
+            cur = ifa.ifa_next
+    finally:
+        if head:
+            libc.freeifaddrs(head)
+    return addrs
+
+
+def _is_placeholder(value: str) -> bool:
+    low = value.strip().lower()
+    return low.startswith("replace-with-") or low in {"changeme", "change-me"}
+
+
+def _parse_cidr(raw: str, name: str) -> IPNetwork | None:
+    value = raw.strip()
+    if not value:
+        return None
+    if "/" not in value:
+        raise ValueError(f"Invalid {name} {raw!r}: expected CIDR notation (e.g. 172.31.0.0/24).")
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name} {raw!r}: {exc}") from exc
+    if network.prefixlen == 0:
+        raise ValueError(f"{name} {raw!r} must not be a catch-all /0 prefix.")
+    if network.network_address.is_unspecified:
+        raise ValueError(f"{name} {raw!r} must not use an unspecified network address.")
+    if isinstance(network, ipaddress.IPv6Network) and network.network_address.ipv4_mapped is not None:
+        raise ValueError(f"{name} {raw!r} must not use an IPv4-mapped IPv6 prefix.")
+    return network
+
+
+@dataclass(frozen=True, slots=True)
+class AdminConfig:
+    """Validated configuration for the optional internal Admin API."""
+
+    token: str = field(default="", repr=False)
+    port: int = DEFAULT_ADMIN_PORT
+    bind_cidr: IPNetwork | None = None
+    allow_cidr: IPNetwork | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.token)
+
+    def __repr__(self) -> str:
+        token_state = "[redacted]" if self.token else ""
+        return (
+            f"AdminConfig(enabled={self.enabled}, port={self.port}, "
+            f"bind_cidr={self.bind_cidr!r}, allow_cidr={self.allow_cidr!r}, token={token_state!r})"
+        )
+
+
+def load_admin_config(environ: Mapping[str, str] | None = None) -> AdminConfig:
+    """Load and validate Admin API environment configuration."""
+    env = os.environ if environ is None else environ
+
+    port = DEFAULT_ADMIN_PORT
+    raw_port = env.get("ADMIN_PORT", "").strip()
+    if raw_port:
+        if not raw_port.isascii() or not raw_port.isdigit():
+            raise ValueError(f"Invalid ADMIN_PORT {raw_port!r}: must be an integer between 1 and 65535.")
+        port = int(raw_port)
+        if port < 1 or port > 65535:
+            raise ValueError(f"Invalid ADMIN_PORT {raw_port!r}: must be between 1 and 65535.")
+        if port == MAIN_PORT:
+            raise ValueError(f"Invalid ADMIN_PORT {port}: must differ from main HTTP port {MAIN_PORT}.")
+
+    bind_cidr = _parse_cidr(env.get("ADMIN_BIND_CIDR", ""), "ADMIN_BIND_CIDR")
+    allow_cidr = _parse_cidr(env.get("ADMIN_ALLOW_CIDR", ""), "ADMIN_ALLOW_CIDR")
+    if allow_cidr is None and bind_cidr is not None:
+        allow_cidr = bind_cidr
+
+    token = env.get("ADMIN_API_TOKEN", "").strip()
+    if token:
+        if _is_placeholder(token):
+            raise ValueError("ADMIN_API_TOKEN must not be a placeholder.")
+        if not token.isascii() or any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in token):
+            raise ValueError("ADMIN_API_TOKEN must contain printable ASCII characters only.")
+        if len(token.encode("ascii")) < MIN_ADMIN_TOKEN_LEN:
+            raise ValueError(f"ADMIN_API_TOKEN must be at least {MIN_ADMIN_TOKEN_LEN} bytes.")
+
+    return AdminConfig(
+        token=token,
+        port=port,
+        bind_cidr=bind_cidr,
+        allow_cidr=allow_cidr,
+    )
+
+
+def resolve_bind_addr(
+    bind_cidr: IPNetwork | None,
+    port: int,
+    interface_ips: Sequence[IPAddress] | None = None,
+) -> tuple[str, int]:
+    """Resolve the exact bind IP/port (127.0.0.1 when bind_cidr is unset; never 0.0.0.0 or ::)."""
+    if port < 1 or port > 65535 or port == MAIN_PORT:
+        raise ValueError(f"Invalid admin port {port}.")
+    if bind_cidr is None:
+        return ("127.0.0.1", port)
+
+    addrs = list_interface_ips() if interface_ips is None else interface_ips
+    for raw_addr in addrs:
+        addr = _unmap_ip(raw_addr)
+        if addr.is_unspecified:
+            continue
+        if addr in bind_cidr:
+            return (str(addr), port)
+    raise RuntimeError(f"No local interface IP found inside ADMIN_BIND_CIDR {bind_cidr}.")
+
+
+def _parse_peer_ip(client: Any) -> IPAddress | None:
+    if not isinstance(client, (tuple, list)) or not client:
+        return None
+    raw_host = client[0]
+    if not isinstance(raw_host, str):
+        return None
+    host = raw_host.strip()
+    if not host or "%" in host:
+        return None
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    return _unmap_ip(addr)
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"invalid JSON constant {token!r}")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def _parse_strict_json_object(raw_body: bytes) -> dict[str, Any]:
+    try:
+        text = raw_body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SettingsValidationError("invalid UTF-8 in settings patch") from exc
+    if not text.strip():
+        raise SettingsValidationError("invalid settings patch JSON")
+    try:
+        parsed = json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise SettingsValidationError("invalid settings patch JSON") from exc
+    if not isinstance(parsed, dict):
+        raise SettingsValidationError("settings patch must be a JSON object")
+    return parsed
+
+
+def _error_response(
+    status_code: int,
+    message: str,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"error": message}, headers=headers)
+
+
+async def _send_json_error(
+    send: Any,
+    method: str,
+    status_code: int,
+    message: str,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
+    body = json.dumps({"error": message}, separators=(",", ":")).encode("utf-8")
+    headers: list[tuple[bytes, bytes]] = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+        (b"cache-control", b"no-store"),
+        (b"x-content-type-options", b"nosniff"),
+    ]
+    if extra_headers:
+        headers.extend(extra_headers)
+    await send({"type": "http.response.start", "status": status_code, "headers": headers})
+    await send({"type": "http.response.body", "body": b"" if method == "HEAD" else body, "more_body": False})
+
+
+class _AdminGuardMiddleware:
+    """ASGI security guard enforcing peer IP allowlist, constant-time Bearer auth, and response headers."""
+
+    def __init__(self, app: Any, config: AdminConfig) -> None:
+        self._app = app
+        self._allow_cidr = config.allow_cidr
+        self._token_bytes = config.token.encode("ascii")
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        scope_type = scope.get("type")
+        if scope_type == "lifespan":
+            await self._app(scope, receive, send)
+            return
+        if scope_type != "http":
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
+
+        method = str(scope.get("method", "GET")).upper()
+        peer_ip = _parse_peer_ip(scope.get("client"))
+        if peer_ip is None:
+            await _send_json_error(send, method, 403, "invalid peer address")
+            return
+
+        if self._allow_cidr is not None:
+            if peer_ip not in self._allow_cidr:
+                await _send_json_error(send, method, 403, "peer outside allowed admin subnet")
+                return
+        elif not peer_ip.is_loopback:
+            await _send_json_error(send, method, 403, "admin API restricted to loopback")
+            return
+
+        auth_headers = [val for name, val in scope.get("headers", ()) if name.lower() == b"authorization"]
+        if len(auth_headers) != 1:
+            await _send_json_error(
+                send,
+                method,
+                401,
+                "missing or invalid admin bearer token",
+                extra_headers=[(b"www-authenticate", b'Bearer realm="choice-admin"')],
+            )
+            return
+
+        parts = auth_headers[0].split()
+        if len(parts) != 2 or parts[0].lower() != b"bearer" or not hmac.compare_digest(
+            parts[1], self._token_bytes
+        ):
+            await _send_json_error(
+                send,
+                method,
+                401,
+                "missing or invalid admin bearer token",
+                extra_headers=[(b"www-authenticate", b'Bearer realm="choice-admin"')],
+            )
+            return
+
+        async def send_with_security_headers(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                filtered = [
+                    (k, v)
+                    for k, v in message.get("headers", ())
+                    if k.lower() not in (b"cache-control", b"x-content-type-options")
+                ]
+                filtered.append((b"cache-control", b"no-store"))
+                filtered.append((b"x-content-type-options", b"nosniff"))
+                message = {**message, "headers": filtered}
+            await send(message)
+
+        await self._app(scope, receive, send_with_security_headers)
+
+
+def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
+    """Build the isolated internal Admin API ASGI application."""
+    if not config.enabled:
+        raise ValueError("Admin API cannot be created without a validated ADMIN_API_TOKEN.")
+
+    app = FastAPI(
+        title="Choice Internal Admin API",
+        version=APP_VERSION,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_exception(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        return _error_response(exc.status_code, str(exc.detail), headers=exc.headers)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_exception(_request: Request, _exc: Exception) -> JSONResponse:
+        return _error_response(500, "internal server error")
+
+    @app.get("/admin/v1/manifest")
+    async def get_manifest() -> dict[str, Any]:
+        return {
+            "service": "choice",
+            "version": APP_VERSION,
+            "capabilities": ["settings"],
+            "endpoints": {
+                "settings_get": "GET /admin/v1/settings",
+                "settings_update": "PATCH /admin/v1/settings",
+            },
+            "settings_schema": [dict(item) for item in SETTINGS_SCHEMA],
+        }
+
+    @app.get("/admin/v1/settings")
+    async def get_settings() -> dict[str, bool | int]:
+        return runtime.to_dict()
+
+    @app.patch("/admin/v1/settings")
+    async def patch_settings(request: Request) -> JSONResponse:
+        raw_cl = request.headers.get("content-length")
+        if raw_cl is not None:
+            cl_str = raw_cl.strip()
+            if not cl_str.isascii() or not cl_str.isdigit():
+                return _error_response(400, "invalid Content-Length header")
+            if int(cl_str) > MAX_ADMIN_BODY_BYTES:
+                return _error_response(413, "request body too large")
+
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_ADMIN_BODY_BYTES:
+                return _error_response(413, "request body too large")
+            body.extend(chunk)
+
+        try:
+            parsed = _parse_strict_json_object(bytes(body))
+            updated = await anyio.to_thread.run_sync(runtime.apply_patch, parsed)
+        except SettingsValidationError as exc:
+            return _error_response(400, str(exc))
+
+        return JSONResponse(status_code=200, content=updated)
+
+    return _AdminGuardMiddleware(app, config)

@@ -14,8 +14,10 @@ Client → cubus shared ingress → FastAPI :8000 → GLiNER2.5-Decide / GPU
 .
 ├── app/
 │   ├── __init__.py
-│   ├── __main__.py          # Server entry point
+│   ├── __main__.py          # Server entry point (public API + optional Admin API)
+│   ├── admin.py             # Optional internal :9090 Admin API server & auth/CIDR guard
 │   ├── api.py               # Routes, authentication, and request handling
+│   ├── runtime.py           # Thread-safe live runtime settings & worker coordination
 │   ├── schemas.py           # Request/response schemas and input validation
 │   ├── model.py             # Model loading, token budget check, and classification
 │   ├── worker.py            # On-demand inference subprocess and idle GPU eviction
@@ -144,14 +146,29 @@ docker run --rm --name choice-api --gpus all \
 - Uses PyTorch 2.7.1+cu126, GLiNER2 2.1.0, and Transformers 5.16.1. FastAPI, Uvicorn, and all dependencies are pinned in `uv.lock`.
 - Model revision: `9d1bfb848cd16d93ee56ccbc59cd92bf0f284d90`.
 
+### Optional Internal Admin API (`:9090`)
+
+Set `ADMIN_API_TOKEN` (minimum 16 bytes, not a `replace-with-*` placeholder) to enable a separate internal-only Admin API listener for `admin.cubus.sh`. When `ADMIN_API_TOKEN` is unset, the `:9090` listener stays completely disabled.
+
+- `ADMIN_API_TOKEN`: Bearer token required for `/admin/v1/*` requests (compared in constant time via `hmac.compare_digest`).
+- `ADMIN_PORT`: internal Admin API port (default `9090`; must be `1..65535` and not `8000`).
+- `ADMIN_BIND_CIDR`: optional CIDR (e.g. `172.31.0.0/24` in `cubus.sh`) selecting the exact local interface IP to bind (defaults to `127.0.0.1` when unset; never binds `0.0.0.0` or `::`).
+- `ADMIN_ALLOW_CIDR`: optional peer IP CIDR allowlist enforced against the TCP peer IP, ignoring `X-Forwarded-For` (defaults to `ADMIN_BIND_CIDR` when set, or loopback when unset).
+
+Endpoints:
+
+- `GET /admin/v1/manifest`: service capabilities and settings schema (`choice`, `settings`).
+- `GET /admin/v1/settings`: current runtime values (`accept_requests`, `idle_timeout_seconds`, `max_text_chars`, `max_labels`; never exposes secrets).
+- `PATCH /admin/v1/settings`: atomically validates and applies runtime settings live (`accept_requests=false` makes `POST /api/classify` return `503` while `/api/healthz` and the Admin API stay up; `idle_timeout_seconds` dynamically updates worker eviction).
+
 ## cubus deployment contract
 
 | Setting | Value |
 |---|---|
 | Dockerfile / build context | Root `Dockerfile` / repository root |
-| Service compose | `compose.service.yml` (`choice` service, extended by `cubus.sh`) |
-| Listener / intended hostname | `0.0.0.0:8000` / `choice.cubus.sh` |
-| Internal network | Shared `web` |
+| Service compose | `compose.service.yml` (`choice` service, extended by `cubus.sh`; exposes `8000` and optional internal `9090`) |
+| Listener / intended hostname | `0.0.0.0:8000` / `choice.cubus.sh` (plus optional `ADMIN_BIND_CIDR:9090` internal Admin API) |
+| Internal network | Shared `web` (plus optional internal `admin` when Admin API is enabled) |
 | Proxy metadata | `VIRTUAL_HOST=choice.cubus.sh`, `VIRTUAL_PORT=8000` |
 | GPU | GPU allocation through NVIDIA Container Toolkit |
 | Required secret | Runtime `API_KEYS` (legacy `API_KEY` accepted when `API_KEYS` is absent) |

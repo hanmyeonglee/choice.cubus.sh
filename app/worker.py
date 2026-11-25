@@ -1,6 +1,7 @@
 """Manage an on-demand inference subprocess that releases its CUDA context when idle."""
 
 import logging
+import math
 import multiprocessing as mp
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -29,7 +30,7 @@ def validate_runtime_config(
             raise ValueError(f"Unsupported PRECISION {precision!r}; expected 'fp16' or 'fp32'.")
         if device == "cpu" and key in {"fp16", "float16"}:
             raise ValueError("CPU execution requires PRECISION=fp32.")
-    if idle_timeout < 0:
+    if not math.isfinite(idle_timeout) or idle_timeout < 0:
         raise ValueError("IDLE_TIMEOUT_SECONDS must be 0 or greater.")
 
 
@@ -100,14 +101,22 @@ class ModelWorker:
         self.idle_timeout = float(idle_timeout)
         self._ctx = mp.get_context("spawn")
         self._lock = Lock()
+        self._proc_state_lock = Lock()
         self._proc: mp.Process | None = None
         self._conn: Connection | None = None
         self._timer: Timer | None = None
+        self._timer_gen = 0
         self._last_used = 0.0
 
     def is_loaded(self) -> bool:
-        proc = self._proc
-        return proc is not None and proc.is_alive()
+        with self._proc_state_lock:
+            proc = self._proc
+            if proc is None:
+                return False
+            try:
+                return proc.is_alive()
+            except (ValueError, AttributeError):
+                return False
 
     def start(self) -> None:
         with self._lock:
@@ -148,6 +157,28 @@ class ModelWorker:
             self._cancel_timer_locked()
             self._stop_worker_locked("server shutdown")
 
+    def set_idle_timeout(self, idle_timeout: float) -> None:
+        """Dynamically update idle eviction timeout and reschedule or evict immediately if needed."""
+        new_timeout = float(idle_timeout)
+        if not math.isfinite(new_timeout) or new_timeout < 0:
+            raise ValueError("IDLE_TIMEOUT_SECONDS must be 0 or greater.")
+        with self._lock:
+            self._cancel_timer_locked()
+            self.idle_timeout = new_timeout
+            if self._proc is None:
+                return
+            if not self._proc.is_alive():
+                self._stop_worker_locked("stale worker cleanup")
+                return
+            if self.idle_timeout <= 0:
+                return
+            idle_for = time.monotonic() - self._last_used
+            remaining = self.idle_timeout - idle_for
+            if remaining <= 0.05:
+                self._stop_worker_locked(f"idle for {idle_for:.0f}s")
+            else:
+                self._schedule_timer_locked(remaining)
+
     def _ensure_worker_locked(self) -> None:
         if self._proc is not None and self._proc.is_alive() and self._conn is not None:
             return
@@ -183,39 +214,49 @@ class ModelWorker:
             proc.close()
             raise RuntimeError(f"Model worker startup failed: {detail}")
 
-        self._proc = proc
+        with self._proc_state_lock:
+            self._proc = proc
         self._conn = parent_conn
+        self._last_used = time.monotonic()
         logging.info("Model worker started: pid=%s %s", proc.pid, detail)
 
     def _cancel_timer_locked(self) -> None:
+        self._timer_gen += 1
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
 
-    def _schedule_timer_locked(self) -> None:
+    def _schedule_timer_locked(self, delay: float | None = None) -> None:
         if self.idle_timeout <= 0:
             return
-        timer = Timer(self.idle_timeout, self._unload_if_idle)
+        wait_seconds = self.idle_timeout if delay is None else max(0.05, delay)
+        self._timer_gen += 1
+        gen = self._timer_gen
+        timer = Timer(wait_seconds, self._unload_if_idle, args=(gen,))
         timer.daemon = True
         timer.start()
         self._timer = timer
 
-    def _unload_if_idle(self) -> None:
+    def _unload_if_idle(self, timer_gen: int | None = None) -> None:
         with self._lock:
-            if self._proc is None:
+            if timer_gen is not None and timer_gen != self._timer_gen:
+                return
+            if self._proc is None or self.idle_timeout <= 0:
                 return
             idle_for = time.monotonic() - self._last_used
-            if idle_for + 0.05 < self.idle_timeout:
-                self._schedule_timer_locked()
+            remaining = self.idle_timeout - idle_for
+            if remaining > 0.05:
+                self._schedule_timer_locked(remaining)
                 return
             self._timer = None
             self._stop_worker_locked(f"idle for {idle_for:.0f}s")
 
     def _stop_worker_locked(self, reason: str) -> None:
         conn = self._conn
-        proc = self._proc
+        with self._proc_state_lock:
+            proc = self._proc
+            self._proc = None
         self._conn = None
-        self._proc = None
 
         if conn is not None:
             try:
@@ -233,5 +274,6 @@ class ModelWorker:
             if proc.is_alive():
                 proc.kill()
                 proc.join()
-            proc.close()
+            with self._proc_state_lock:
+                proc.close()
             logging.info("Model worker stopped (%s): pid=%s GPU context released", reason, pid)

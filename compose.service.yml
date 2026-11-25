@@ -8,6 +8,7 @@ services:
         required: true
     expose:
       - "8000"
+      - "9090"
     deploy:
       resources:
         reservations:
