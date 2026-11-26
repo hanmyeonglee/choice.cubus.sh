@@ -6,11 +6,14 @@ from collections.abc import Mapping, Sequence
 import ctypes
 from dataclasses import dataclass, field
 import hmac
+import inspect
 import ipaddress
 import json
+import logging
 import os
 import socket
 import sys
+import threading
 from typing import Any
 
 import anyio
@@ -18,12 +21,32 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .runtime import APP_VERSION, MAIN_PORT, SETTINGS_SCHEMA, ChoiceRuntime, SettingsValidationError
+from .runtime import APP_VERSION, MAIN_PORT, MODEL_ID, SETTINGS_SCHEMA, ChoiceRuntime, SettingsValidationError
+from .worker import WorkerCancelledError
+
+
+def _supports_kwarg(fn: Any, name: str) -> bool:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters
+    return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 DEFAULT_ADMIN_PORT = 9090
 MIN_ADMIN_TOKEN_LEN = 16
 MAX_ADMIN_BODY_BYTES = 16 << 10  # 16 KiB
+MAX_ADMIN_CLASSIFY_BODY_BYTES = 256 << 10  # 256 KiB
+MAX_ADMIN_BATCH_ITEMS = 64
+MAX_ADMIN_ITEM_ID_CHARS = 64
+MAX_ADMIN_ITEM_TEXT_CHARS = 4000
+MAX_ADMIN_PROMPT_CHARS = 512
+MAX_ADMIN_TASK_CHARS = 64
+MIN_ADMIN_LABELS = 2
+MAX_ADMIN_LABELS = 16
+MAX_ADMIN_LABEL_NAME_CHARS = 64
+MAX_ADMIN_LABEL_DESC_CHARS = 240
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -258,13 +281,21 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return obj
 
 
-def _parse_strict_json_object(raw_body: bytes) -> dict[str, Any]:
+class _AdminBodyError(ValueError):
+    """HTTP-status-tagged request body or JSON parsing error."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _parse_strict_json_object(raw_body: bytes, context: str = "settings patch") -> dict[str, Any]:
     try:
         text = raw_body.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise SettingsValidationError("invalid UTF-8 in settings patch") from exc
+        raise SettingsValidationError(f"invalid UTF-8 in {context}") from exc
     if not text.strip():
-        raise SettingsValidationError("invalid settings patch JSON")
+        raise SettingsValidationError(f"invalid {context} JSON")
     try:
         parsed = json.loads(
             text,
@@ -272,10 +303,120 @@ def _parse_strict_json_object(raw_body: bytes) -> dict[str, Any]:
             object_pairs_hook=_reject_duplicate_keys,
         )
     except (ValueError, RecursionError) as exc:
-        raise SettingsValidationError("invalid settings patch JSON") from exc
+        raise SettingsValidationError(f"invalid {context} JSON") from exc
     if not isinstance(parsed, dict):
-        raise SettingsValidationError("settings patch must be a JSON object")
+        raise SettingsValidationError(f"{context} must be a JSON object")
     return parsed
+
+
+async def _read_bounded_json_object(request: Request, max_bytes: int, context: str) -> dict[str, Any]:
+    raw_cl = request.headers.get("content-length")
+    if raw_cl is not None:
+        cl_str = raw_cl.strip()
+        if not cl_str.isascii() or not cl_str.isdigit():
+            raise _AdminBodyError(400, "invalid Content-Length header")
+        if int(cl_str) > max_bytes:
+            raise _AdminBodyError(413, "request body too large")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > max_bytes:
+            raise _AdminBodyError(413, "request body too large")
+        body.extend(chunk)
+
+    try:
+        return _parse_strict_json_object(bytes(body), context=context)
+    except SettingsValidationError as exc:
+        raise _AdminBodyError(400, str(exc)) from exc
+
+
+def _validate_non_blank_str(value: object, name: str, max_len: int) -> str:
+    if not isinstance(value, str):
+        raise SettingsValidationError(f"{name} must be a string")
+    if not value.strip():
+        raise SettingsValidationError(f"{name} must not be blank")
+    if len(value) > max_len:
+        raise SettingsValidationError(f"{name} must not exceed {max_len} characters")
+    return value
+
+
+def _validate_classify_batch_payload(
+    parsed: dict[str, Any],
+) -> tuple[list[tuple[str, str]], list[str] | dict[str, str | None], str, str | None]:
+    allowed_top = {"prompt", "task", "labels", "items"}
+    unknown_top = sorted(set(parsed) - allowed_top)
+    if unknown_top:
+        raise SettingsValidationError(f"unknown field {unknown_top[0]!r}")
+    if "labels" not in parsed:
+        raise SettingsValidationError("labels is required")
+    if "items" not in parsed:
+        raise SettingsValidationError("items is required")
+
+    prompt: str | None = None
+    if "prompt" in parsed and parsed["prompt"] is not None:
+        prompt = _validate_non_blank_str(parsed["prompt"], "prompt", MAX_ADMIN_PROMPT_CHARS)
+
+    task = "decision"
+    if "task" in parsed:
+        task = _validate_non_blank_str(parsed["task"], "task", MAX_ADMIN_TASK_CHARS)
+
+    raw_labels = parsed["labels"]
+    validated_labels: list[str] | dict[str, str | None]
+    if isinstance(raw_labels, list):
+        if not (MIN_ADMIN_LABELS <= len(raw_labels) <= MAX_ADMIN_LABELS):
+            raise SettingsValidationError(
+                f"labels must contain between {MIN_ADMIN_LABELS} and {MAX_ADMIN_LABELS} items"
+            )
+        label_list: list[str] = []
+        for idx, raw_name in enumerate(raw_labels):
+            name = _validate_non_blank_str(raw_name, f"labels[{idx}]", MAX_ADMIN_LABEL_NAME_CHARS)
+            label_list.append(name)
+        if len(set(label_list)) != len(label_list):
+            raise SettingsValidationError("label names must be unique")
+        validated_labels = label_list
+    elif isinstance(raw_labels, dict):
+        if not (MIN_ADMIN_LABELS <= len(raw_labels) <= MAX_ADMIN_LABELS):
+            raise SettingsValidationError(
+                f"labels must contain between {MIN_ADMIN_LABELS} and {MAX_ADMIN_LABELS} entries"
+            )
+        label_dict: dict[str, str | None] = {}
+        for raw_name, raw_desc in raw_labels.items():
+            name = _validate_non_blank_str(raw_name, "label name", MAX_ADMIN_LABEL_NAME_CHARS)
+            if raw_desc is None:
+                label_dict[name] = None
+            else:
+                label_dict[name] = _validate_non_blank_str(
+                    raw_desc, f"label description for {name!r}", MAX_ADMIN_LABEL_DESC_CHARS
+                )
+        validated_labels = label_dict
+    else:
+        raise SettingsValidationError("labels must be a list of strings or an object")
+
+    raw_items = parsed["items"]
+    if not isinstance(raw_items, list):
+        raise SettingsValidationError("items must be a non-empty list")
+    if not (1 <= len(raw_items) <= MAX_ADMIN_BATCH_ITEMS):
+        raise SettingsValidationError(f"items must contain between 1 and {MAX_ADMIN_BATCH_ITEMS} entries")
+
+    validated_items: list[tuple[str, str]] = []
+    seen_ids: set[str] = set()
+    allowed_item_keys = {"id", "text"}
+    for idx, entry in enumerate(raw_items):
+        if not isinstance(entry, dict):
+            raise SettingsValidationError(f"items[{idx}] must be a JSON object")
+        unknown_item = sorted(set(entry) - allowed_item_keys)
+        if unknown_item:
+            raise SettingsValidationError(f"items[{idx}] contains unknown field {unknown_item[0]!r}")
+        if "id" not in entry or "text" not in entry:
+            raise SettingsValidationError(f"items[{idx}] must contain 'id' and 'text'")
+        item_id = _validate_non_blank_str(entry["id"], f"items[{idx}].id", MAX_ADMIN_ITEM_ID_CHARS)
+        if item_id in seen_ids:
+            raise SettingsValidationError(f"duplicate item id {item_id!r}")
+        seen_ids.add(item_id)
+        item_text = _validate_non_blank_str(entry["text"], f"items[{idx}].text", MAX_ADMIN_ITEM_TEXT_CHARS)
+        validated_items.append((item_id, item_text))
+
+    return validated_items, validated_labels, task, prompt
 
 
 def _error_response(
@@ -389,6 +530,9 @@ def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
         redoc_url=None,
         openapi_url=None,
     )
+    # Separate limiters keep :8000 saturation and heavy :9090 batch inference from starving emergency settings updates.
+    settings_limiter = anyio.CapacityLimiter(4)
+    classify_limiter = anyio.CapacityLimiter(4)
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_exception(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -403,10 +547,12 @@ def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
         return {
             "service": "choice",
             "version": APP_VERSION,
-            "capabilities": ["settings"],
+            "model": MODEL_ID,
+            "capabilities": ["settings", "classify"],
             "endpoints": {
                 "settings_get": "GET /admin/v1/settings",
                 "settings_update": "PATCH /admin/v1/settings",
+                "classify_batch": "POST /admin/v1/classify/batch",
             },
             "settings_schema": [dict(item) for item in SETTINGS_SCHEMA],
         }
@@ -417,26 +563,106 @@ def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
 
     @app.patch("/admin/v1/settings")
     async def patch_settings(request: Request) -> JSONResponse:
-        raw_cl = request.headers.get("content-length")
-        if raw_cl is not None:
-            cl_str = raw_cl.strip()
-            if not cl_str.isascii() or not cl_str.isdigit():
-                return _error_response(400, "invalid Content-Length header")
-            if int(cl_str) > MAX_ADMIN_BODY_BYTES:
-                return _error_response(413, "request body too large")
-
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > MAX_ADMIN_BODY_BYTES:
-                return _error_response(413, "request body too large")
-            body.extend(chunk)
-
         try:
-            parsed = _parse_strict_json_object(bytes(body))
-            updated = await anyio.to_thread.run_sync(runtime.apply_patch, parsed)
+            parsed = await _read_bounded_json_object(request, MAX_ADMIN_BODY_BYTES, "settings patch")
+            updated = await anyio.to_thread.run_sync(runtime.apply_patch, parsed, limiter=settings_limiter)
+        except _AdminBodyError as exc:
+            return _error_response(exc.status_code, str(exc))
         except SettingsValidationError as exc:
             return _error_response(400, str(exc))
 
         return JSONResponse(status_code=200, content=updated)
+
+    @app.post("/admin/v1/classify/batch")
+    async def classify_batch_admin(request: Request) -> JSONResponse:
+        try:
+            parsed = await _read_bounded_json_object(
+                request, MAX_ADMIN_CLASSIFY_BODY_BYTES, "classify batch payload"
+            )
+            validated_items, labels, task, prompt = _validate_classify_batch_payload(parsed)
+        except _AdminBodyError as exc:
+            return _error_response(exc.status_code, str(exc))
+        except SettingsValidationError as exc:
+            return _error_response(400, str(exc))
+
+        worker = runtime.get_worker()
+        if worker is None:
+            return _error_response(503, "model worker unavailable")
+
+        batch_inputs = [(item_text, labels, task, prompt) for _, item_text in validated_items]
+        cancel_event = threading.Event()
+        classify_batch_fn = worker.classify_batch
+        kwargs: dict[str, Any] = {}
+        if _supports_kwarg(classify_batch_fn, "cancel_event"):
+            kwargs["cancel_event"] = cancel_event
+        if _supports_kwarg(classify_batch_fn, "plane"):
+            kwargs["plane"] = "admin"
+
+        def _invoke() -> list[tuple[str, Any]]:
+            return classify_batch_fn(batch_inputs, **kwargs)
+
+        raw_results: list[tuple[str, Any]] | None = None
+        worker_exc: Exception | None = None
+        disconnected = False
+        try:
+            async with anyio.create_task_group() as tg:
+                async def _watch_disconnect() -> None:
+                    nonlocal disconnected
+                    while True:
+                        try:
+                            msg = await request.receive()
+                        except Exception:
+                            return
+                        if msg.get("type") == "http.disconnect":
+                            disconnected = True
+                            cancel_event.set()
+                            tg.cancel_scope.cancel()
+                            return
+                        if not msg.get("more_body", False):
+                            return
+
+                tg.start_soon(_watch_disconnect)
+                try:
+                    raw_results = await anyio.to_thread.run_sync(
+                        _invoke,
+                        limiter=classify_limiter,
+                        abandon_on_cancel=True,
+                    )
+                except Exception as exc:
+                    worker_exc = exc
+                finally:
+                    tg.cancel_scope.cancel()
+        finally:
+            cancel_event.set()
+
+        if worker_exc is not None:
+            if isinstance(worker_exc, WorkerCancelledError):
+                return _error_response(499, "request cancelled")
+            if isinstance(worker_exc, RuntimeError):
+                logging.warning("Admin batch classification failed: %s", worker_exc)
+                return _error_response(503, "model worker unavailable")
+            raise worker_exc
+
+        if disconnected or raw_results is None:
+            return _error_response(499, "request cancelled")
+
+        if len(raw_results) != len(validated_items):
+            logging.error(
+                "Admin batch classification result length mismatch: %d != %d",
+                len(raw_results),
+                len(validated_items),
+            )
+            return _error_response(500, "internal server error")
+
+        results: list[dict[str, Any]] = []
+        for (item_id, _), entry_result in zip(validated_items, raw_results, strict=True):
+            status, payload = entry_result
+            if status == "ok":
+                choice, probabilities = payload
+                results.append({"id": item_id, "choice": choice, "probabilities": probabilities})
+            else:
+                results.append({"id": item_id, "error": str(payload)})
+
+        return JSONResponse(status_code=200, content={"model": MODEL_ID, "results": results})
 
     return _AdminGuardMiddleware(app, config)

@@ -42,6 +42,7 @@ def build_servers(
         port=main_port,
         proxy_headers=True,
         forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        limit_concurrency=32,
     )
     servers: list[_ManagedServer] = [_ManagedServer(main_cfg)]
 
@@ -134,7 +135,7 @@ def main() -> None:
         load_api_keys()
         runtime = ChoiceRuntime.from_env()
         validate_runtime_config(
-            os.environ.get("MODEL_PATH", "/opt/models/gliner2.5-decide"),
+            os.environ.get("MODEL_PATH", "/opt/models/amber-150m"),
             device=os.environ.get("DEVICE", "cuda"),
             precision=os.environ.get("PRECISION"),
             idle_timeout=runtime.initial_worker_idle_timeout(),

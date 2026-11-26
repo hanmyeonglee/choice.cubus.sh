@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Classify text against candidate labels with Choice API backed by GLiNER2.5-Decide. Explore request examples and API documentation.">
-  <title>Choice — GLiNER2.5-Decide Classification API</title>
+  <meta name="description" content="Classify text against candidate labels with Choice API backed by Amber 150M. Explore request examples and API documentation.">
+  <title>Choice — Amber 150M Classification API</title>
   <style>
     :root { color-scheme: dark; --bg: #111512; --panel: #191e1a; --line: #333c35; --text: #edf1e9; --muted: #a4afa6; --accent: #c7ef92; }
     * { box-sizing: border-box; }
@@ -68,12 +68,12 @@
       <div class="hero">
         <div class="eyebrow">TEXT IN. DECISION OUT.</div>
         <h1>Send context.<br>Get decisions.</h1>
-        <p class="intro">Classify text against competing candidate labels with GLiNER2.5-Decide. Supply bare label lists or descriptive candidate definitions with an optional question prompt.</p>
+        <p class="intro">Classify text against competing candidate labels with Amber 150M. Supply bare label lists or descriptive candidate definitions with an optional question prompt.</p>
         <div class="actions"><a class="button" href="/docs">Open API docs →</a><a class="secondary" href="#quickstart">View request example</a></div>
         <div class="endpoint"><span class="method">POST</span><code>/api/classify</code><span class="auth">Bearer authentication</span></div>
       </div>
       <div class="types">
-        <article class="type"><h2>01 / text</h2><p>Send original prose, labeled sections, or structured JSON objects up to 2,000 characters.</p></article>
+        <article class="type"><h2>01 / text</h2><p>Send original prose, labeled sections, or structured JSON objects up to 8,000 characters by default (configurable up to 16,000).</p></article>
         <article class="type"><h2>02 / labels</h2><p>Pass 2–16 competing labels as a list of names or a dictionary with concise descriptions.</p></article>
         <article class="type"><h2>03 / choice</h2><p>Receive the winning label and native softmax scores across all candidates.</p></article>
       </div>
@@ -110,7 +110,7 @@
         <ul class="guidelines">
           <li>Pass bare label lists (e.g. <code>["negative", "neutral", "positive"]</code>) when label names are self-explanatory.</li>
           <li>Add concise label descriptions and an optional <code>prompt</code> when domain boundaries need disambiguation.</li>
-          <li>Keep complete prepared inputs within 1,024 subword tokens; oversized inputs return 422 instead of truncating silently.</li>
+          <li>Keep complete prepared inputs within 7,999 subword tokens; oversized inputs return 422 instead of truncating silently.</li>
         </ul>
       </section>
       <section aria-labelledby="endpoints">
@@ -122,10 +122,10 @@
             <tr><td>GET</td><td><code>/api/healthz</code></td><td>Readiness</td><td>None</td></tr>
           </tbody>
         </table></div>
-        <p class="note">Text is limited to 2,000 characters after serialization and 1,024 prepared subword tokens. Scores are not calibrated probabilities of correctness.</p>
+        <p class="note">Text defaults to an 8,000-character limit after serialization (configurable up to 16,000) and 7,999 prepared subword tokens. Scores are not calibrated probabilities of correctness.</p>
       </section>
     </main>
-    <footer><span>Choice · GLiNER2.5-Decide classification API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>
+    <footer><span>Choice · Amber 150M classification API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>
   </div>
 </body>
 </html>

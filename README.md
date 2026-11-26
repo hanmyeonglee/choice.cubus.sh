@@ -1,11 +1,11 @@
 # choice.cubus.sh
 
 A small FastAPI server that performs single-choice text classification by calling
-[GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide) (`fastino/GLiNER2.5-Decide`) directly.
-It loads one fixed model and processes one request at a time using FP16 on CUDA (or FP32 on CPU) with standard attention and a hard 1,024-token prepared input budget.
+[Amber 150M](https://huggingface.co/MLukauskas/amber-150m) (`MLukauskas/amber-150m`, 151M parameters, `CC-BY-NC-4.0`, English-primary) directly.
+It loads one fixed model in an on-demand worker subprocess using FP16 on CUDA (or FP32 on CPU), dynamic micro-batching (`coalesce_ms=5.0`, `max_batch_size=32`, `token_budget=8192` for `<= 2,048` tokens), O(L) banded attention for long sequences (`> 2,048` tokens), and a hard 7,999-token prepared input budget.
 
 ```text
-Client → cubus shared ingress → FastAPI :8000 → GLiNER2.5-Decide / GPU
+Client → cubus shared ingress → FastAPI :8000 → Dynamic Micro-Batch Worker → Amber 150M / GPU
 ```
 
 ## Repository layout
@@ -47,7 +47,7 @@ For isolated precision, format ablation, and System One model comparisons, see
 | Method / path | Purpose | Authentication |
 |---|---|---|
 | `POST /api/classify` | Classify text against 2–16 competing candidate labels | Bearer key |
-| `GET /api/healthz` | Server readiness and model residency (`model_loaded`) | None |
+| `GET /api/healthz` | Server readiness, model residency (`model_loaded`), and `model` ID | None |
 | `GET /` | Introduction and request example | None |
 | `GET /docs` | Swagger UI documentation and interactive requests | None |
 | `GET /openapi.json` | OpenAPI schema | None |
@@ -101,16 +101,17 @@ Scores in this response example are illustrative:
 }
 ```
 
-- One model (`fastino/GLiNER2.5-Decide`) is fixed on the server. Requests have no `model` field.
-- `text`: original prose, labeled sections, or a JSON object/array serialized as compact JSON up to 2,000 characters.
-- `labels`: 2–16 distinct candidate labels. Pass either:
+- One model (`MLukauskas/amber-150m`, 151M parameters, `CC-BY-NC-4.0`, English-primary) is fixed on the server. Requests have no `model` field.
+- `text`: original prose, labeled sections, or a JSON object/array serialized as compact JSON (defaults to 8,000 characters, configurable 100–16,000 via the Admin API).
+- `labels`: 2–16 distinct candidate labels (subject to runtime `max_labels`). Pass either:
   - a list of label names (e.g., `["negative", "neutral", "positive"]`), or
   - a dictionary mapping label names (1–64 chars) to optional descriptions (1–160 chars).
 - `task`: optional task or category group name (1–64 chars, defaults to `"decision"`).
 - `prompt`: optional question or classification instruction (1–320 chars).
 - For binary or yes/no questions, pass two meaningful competing labels (such as `["no", "yes"]` or `{"safe": "...", "unsafe": "..."}`) rather than a single statement.
-- Prepared sequences (text + task + prompt + labels and descriptions) exceeding 1,024 subword tokens are rejected with HTTP 422 rather than silently truncated.
+- Prepared sequences (text + task + prompt + labels and descriptions) exceeding 7,999 subword tokens are rejected with HTTP 422 rather than silently truncated.
 - Invalid keys return 401; invalid or oversized input returns 422.
+- Amber 150M is English-primary and trained on typed decision tasks; returned scores are softmax distributions over the provided candidates and are not calibrated probabilities of truth.
 
 ### Writing effective classification requests
 
@@ -139,12 +140,12 @@ docker run --rm --name choice-api --gpus all \
 
 - `DEVICE`: defaults to `cuda`. Set to `cpu` explicitly for CPU execution. CUDA mode refuses to start if no GPU is available.
 - `PRECISION`: defaults to `fp16` on `cuda` and `fp32` on `cpu`.
-- `IDLE_TIMEOUT_SECONDS`: defaults to `180` (3 minutes). The model loads in a dedicated worker subprocess on the first `/api/classify` request and terminates after `IDLE_TIMEOUT_SECONDS` of inactivity, releasing 100% of GPU VRAM (including the CUDA context). Set to `0` to pre-load on startup and keep the model resident permanently.
-- `MODEL_PATH`: defaults to `/opt/models/gliner2.5-decide`.
+- `IDLE_TIMEOUT_SECONDS`: defaults to `180` (3 minutes). The model loads in a dedicated dynamic micro-batching worker subprocess on the first classification request and terminates after `IDLE_TIMEOUT_SECONDS` of inactivity, releasing 100% of GPU VRAM (including the CUDA context). Set to `0` to pre-load on startup and keep the model resident permanently.
+- `MODEL_PATH`: defaults to `/opt/models/amber-150m`.
 - Model weights and tokenizer files are included in the image; there are no external downloads at runtime.
 - uv is used only to install locked dependencies during the build. The runtime image does not include uv.
-- Uses PyTorch 2.7.1+cu126, GLiNER2 2.1.0, and Transformers 5.16.1. FastAPI, Uvicorn, and all dependencies are pinned in `uv.lock`.
-- Model revision: `9d1bfb848cd16d93ee56ccbc59cd92bf0f284d90`.
+- Uses PyTorch 2.7.1+cu126, Transformers 5.16.1, Safetensors 0.8.0, FastAPI 0.143.3, and Uvicorn 0.54.0. All dependencies are pinned in `uv.lock`.
+- Model revision: `51ee1bba1f9e71aae4bf65bde1d43216260b6aab`.
 
 ### Optional Internal Admin API (`:9090`)
 
@@ -157,9 +158,10 @@ Set `ADMIN_API_TOKEN` (minimum 16 bytes, not a `replace-with-*` placeholder) to 
 
 Endpoints:
 
-- `GET /admin/v1/manifest`: service capabilities and settings schema (`choice`, `settings`).
+- `GET /admin/v1/manifest`: service capabilities and settings schema (`service: "choice"`, `version: "0.3.0"`, `model: "amber-150m"`, `capabilities: ["settings", "classify"]`).
 - `GET /admin/v1/settings`: current runtime values (`accept_requests`, `idle_timeout_seconds`, `max_text_chars`, `max_labels`; never exposes secrets).
 - `PATCH /admin/v1/settings`: atomically validates and applies runtime settings live (`accept_requests=false` makes `POST /api/classify` return `503` while `/api/healthz` and the Admin API stay up; `idle_timeout_seconds` dynamically updates worker eviction).
+- `POST /admin/v1/classify/batch`: internal batch classification endpoint sharing the single `ModelWorker` instance (up to 256 KiB JSON payload, 1–64 items of 1–4,000 chars each, optional `prompt` up to 512 chars, optional `task` up to 64 chars, `2–16` labels with optional descriptions up to 240 chars). Isolates per-item token-limit/model errors without failing the rest of the batch and stays available even when `accept_requests=false`.
 
 ## cubus deployment contract
 

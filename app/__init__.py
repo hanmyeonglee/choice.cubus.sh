@@ -1,1 +1,1 @@
-"""Choice classification server backed by GLiNER2.5-Decide."""
+"""Choice classification server backed by Amber 150M."""

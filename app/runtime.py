@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import math
 from threading import Lock
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
+MODEL_ID = "amber-150m"
 MAIN_PORT = 8000
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 180
 MIN_IDLE_TIMEOUT_SECONDS = 0
 MAX_IDLE_TIMEOUT_SECONDS = 86400
 
-DEFAULT_MAX_TEXT_CHARS = 2000
+DEFAULT_MAX_TEXT_CHARS = 8000
 MIN_MAX_TEXT_CHARS = 100
-MAX_MAX_TEXT_CHARS = 2000
+MAX_MAX_TEXT_CHARS = 16000
 
 DEFAULT_MAX_LABELS = 16
 MIN_MAX_LABELS = 2
@@ -44,7 +46,7 @@ SETTINGS_SCHEMA: tuple[dict[str, Any], ...] = (
         "type": "int",
         "min": MIN_MAX_TEXT_CHARS,
         "max": MAX_MAX_TEXT_CHARS,
-        "help": "Maximum character length of serialized text accepted by POST /api/classify (100–2,000).",
+        "help": "Maximum character length of serialized text accepted by POST /api/classify (100–16,000).",
     },
     {
         "key": "max_labels",
@@ -69,9 +71,14 @@ class SettingsValidationError(ValueError):
 
 
 class WorkerController(Protocol):
-    """Subset of ModelWorker controlled by ChoiceRuntime."""
+    """Subset of ModelWorker controlled and shared via ChoiceRuntime."""
 
     def set_idle_timeout(self, idle_timeout: float) -> None: ...
+
+    def classify_batch(
+        self,
+        items: Sequence[tuple[str, list[str] | dict[str, str | None], str, str | None]],
+    ) -> list[tuple[str, Any]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +133,7 @@ class ChoiceRuntime:
             )
 
         self._state_lock = Lock()
-        self._patch_lock = Lock()
+        self._worker_timeout_lock = Lock()
         self._accept_requests = accept_requests
         self._idle_timeout_seconds = idle_timeout_seconds
         self._worker_idle_timeout = raw_worker_timeout
@@ -165,7 +172,7 @@ class ChoiceRuntime:
             return self._worker_idle_timeout
 
     def attach_worker(self, worker: WorkerController) -> None:
-        with self._patch_lock:
+        with self._worker_timeout_lock:
             with self._state_lock:
                 self._worker = worker
                 patched = self._idle_timeout_patched
@@ -174,9 +181,14 @@ class ChoiceRuntime:
                 worker.set_idle_timeout(target_idle)
 
     def detach_worker(self) -> None:
-        with self._patch_lock:
+        with self._worker_timeout_lock:
             with self._state_lock:
                 self._worker = None
+
+    def get_worker(self) -> WorkerController | None:
+        """Return the currently attached shared ModelWorker, or None if unavailable."""
+        with self._state_lock:
+            return self._worker
 
     def snapshot(self) -> SettingsSnapshot:
         with self._state_lock:
@@ -205,28 +217,30 @@ class ChoiceRuntime:
             else:
                 validated[key] = _validate_int_range(key, value)
 
-        with self._patch_lock:
-            with self._state_lock:
-                if "accept_requests" in validated:
-                    self._accept_requests = bool(validated["accept_requests"])
-                if "idle_timeout_seconds" in validated:
-                    self._idle_timeout_seconds = int(validated["idle_timeout_seconds"])
-                    self._idle_timeout_patched = True
-                if "max_text_chars" in validated:
-                    self._max_text_chars = int(validated["max_text_chars"])
-                if "max_labels" in validated:
-                    self._max_labels = int(validated["max_labels"])
+        with self._state_lock:
+            if "accept_requests" in validated:
+                self._accept_requests = bool(validated["accept_requests"])
+            if "idle_timeout_seconds" in validated:
+                self._idle_timeout_seconds = int(validated["idle_timeout_seconds"])
+                self._idle_timeout_patched = True
+            if "max_text_chars" in validated:
+                self._max_text_chars = int(validated["max_text_chars"])
+            if "max_labels" in validated:
+                self._max_labels = int(validated["max_labels"])
 
-                worker = self._worker
-                new_idle = float(self._idle_timeout_seconds)
-                result = SettingsSnapshot(
-                    accept_requests=self._accept_requests,
-                    idle_timeout_seconds=self._idle_timeout_seconds,
-                    max_text_chars=self._max_text_chars,
-                    max_labels=self._max_labels,
-                ).to_dict()
+            result = SettingsSnapshot(
+                accept_requests=self._accept_requests,
+                idle_timeout_seconds=self._idle_timeout_seconds,
+                max_text_chars=self._max_text_chars,
+                max_labels=self._max_labels,
+            ).to_dict()
 
-            if "idle_timeout_seconds" in validated and worker is not None:
-                worker.set_idle_timeout(new_idle)
+        if "idle_timeout_seconds" in validated:
+            with self._worker_timeout_lock:
+                with self._state_lock:
+                    worker = self._worker
+                    latest_idle = float(self._idle_timeout_seconds)
+                if worker is not None:
+                    worker.set_idle_timeout(latest_idle)
 
         return result

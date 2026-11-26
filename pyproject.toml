@@ -1,13 +1,13 @@
 [project]
 name = "choice-server"
-version = "0.2.0"
-description = "A minimal GLiNER2.5-Decide classification API for GTX 1060"
+version = "0.3.0"
+description = "A minimal Amber 150M classification API for GTX 1060"
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi==0.143.3",
     "uvicorn==0.54.0",
-    "gliner2==2.1.0",
     "transformers==5.16.1",
+    "safetensors==0.8.0",
     "torch==2.7.1+cu126",
 ]
 

@@ -1,9 +1,9 @@
-"""Request and response schemas for the GLiNER2.5-Decide classification API."""
+"""Request and response schemas for the Amber 150M classification API."""
 
 import json
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
 LabelName = Annotated[str, Field(min_length=1, max_length=64)]
 Description = Annotated[str, Field(min_length=1, max_length=160)]
@@ -37,8 +37,9 @@ class ClassifyRequest(BaseModel):
         description=(
             "Source material and context to classify. Use a string containing original prose "
             "or labeled sections by default. Objects and arrays are also accepted and serialized "
-            "as compact JSON text. The serialized text must not exceed 2,000 characters, and the "
-            "complete prepared sequence (text + task + prompt + labels) must not exceed 1,024 tokens."
+            "as compact JSON text. The serialized text must not exceed 16,000 characters "
+            "(subject to the active runtime max_text_chars setting), and the complete prepared "
+            "sequence (text + task + prompt + labels) must not exceed 7,999 tokens."
         ),
         examples=[
             "I was charged twice for the same order.",
@@ -63,14 +64,23 @@ class ClassifyRequest(BaseModel):
         default=None,
         description="Optional question or classification instruction describing the decision.",
     )
+    _rendered_text: str | None = PrivateAttr(default=None)
+
+    @property
+    def rendered_text(self) -> str:
+        """Return the cached serialized text produced during request validation."""
+        if self._rendered_text is None:
+            self._rendered_text = render_text(self.text)
+        return self._rendered_text
 
     @model_validator(mode="after")
     def validate_inputs(self):
         rendered = render_text(self.text)
         if not rendered.strip():
             raise ValueError("text must not be blank.")
-        if len(rendered) > 2000:
-            raise ValueError("text must not exceed 2,000 characters after serialization.")
+        if len(rendered) > 16000:
+            raise ValueError("text must not exceed 16,000 characters after serialization.")
+        self._rendered_text = rendered
         if not self.task.strip():
             raise ValueError("task must not be blank.")
         if self.prompt is not None and not self.prompt.strip():
