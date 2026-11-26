@@ -1,12 +1,11 @@
 """A minimal single-choice classification API backed by Amber 150M."""
 
+import hmac
 import inspect
 import json
 import logging
 import os
-import secrets
 import threading
-from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
@@ -14,8 +13,10 @@ from typing import Annotated, Any
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
+from .api_keys import APIKeyStore, APIKeyStoreError
+from .db import create_postgres_api_key_store
 from .runtime import APP_VERSION, MODEL_ID, ChoiceRuntime
 from .schemas import ClassifyRequest, ClassifyResponse
 from .worker import ModelWorker, WorkerCancelledError, WorkerInputTooLongError
@@ -32,6 +33,7 @@ def _supports_kwarg(fn: Any, name: str) -> bool:
 
 MAX_PUBLIC_BODY_BYTES = 128 << 10  # 128 KiB
 PUBLIC_CLASSIFY_CONCURRENCY = 24
+AUTH_DB_CONCURRENCY = 5  # Leaves headroom inside max_size=8 pool for :9090 Admin API & usage flusher.
 
 
 async def _send_public_json_error(send: Any, status_code: int, detail: str) -> None:
@@ -110,40 +112,75 @@ class _PublicClassifyLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
 
-def _parse_api_keys(environ: Mapping[str, str] | None = None) -> tuple[bytes, ...]:
-    env = os.environ if environ is None else environ
-    configured_keys = env.get("API_KEYS", env.get("API_KEY", ""))
-    return tuple(key.strip().encode() for key in configured_keys.split(",") if key.strip())
+def _extract_api_key(request: Request) -> str | None:
+    """Extract a single unambiguous API key from Authorization: Bearer or X-API-Key."""
+    auth_values = request.headers.getlist("authorization")
+    x_api_key_values = request.headers.getlist("x-api-key")
+
+    if len(auth_values) > 1 or len(x_api_key_values) > 1:
+        return None
+
+    bearer_token: str | None = None
+    if len(auth_values) == 1:
+        parts = auth_values[0].split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        bearer_token = parts[1]
+
+    header_token: str | None = None
+    if len(x_api_key_values) == 1:
+        raw = x_api_key_values[0].strip()
+        if not raw or any(ch.isspace() for ch in raw):
+            return None
+        header_token = raw
+
+    if bearer_token is not None and header_token is not None:
+        try:
+            bearer_bytes = bearer_token.encode("utf-8", errors="strict")
+            header_bytes = header_token.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return None
+        if not hmac.compare_digest(bearer_bytes, header_bytes):
+            return None
+        return bearer_token
+
+    return bearer_token if bearer_token is not None else header_token
 
 
-def validate_api_keys(api_keys: tuple[bytes, ...]) -> tuple[bytes, ...]:
-    """Ensure at least one non-placeholder Bearer API key is configured."""
-    if not api_keys or any(key.startswith(b"replace-with-") for key in api_keys):
-        raise RuntimeError("Set API_KEYS to one or more real Bearer keys before starting the server.")
-    return api_keys
-
-
-def load_api_keys(environ: Mapping[str, str] | None = None) -> tuple[bytes, ...]:
-    """Read and validate non-placeholder Bearer API keys from environment variables."""
-    return validate_api_keys(_parse_api_keys(environ))
-
-
-def create_app(runtime: ChoiceRuntime | None = None):
+def create_app(
+    runtime: ChoiceRuntime | None = None,
+    api_key_store: APIKeyStore | None = None,
+):
     active_runtime = ChoiceRuntime.from_env() if runtime is None else runtime
-    api_keys = _parse_api_keys()
 
     @asynccontextmanager
     async def lifespan(app):
-        validate_api_keys(api_keys)
+        owns_store = api_key_store is None
+        store = (
+            await anyio.to_thread.run_sync(create_postgres_api_key_store)
+            if api_key_store is None
+            else api_key_store
+        )
+        store.start_background_flush()
+        app.state.api_key_store = store
+
         device = os.environ.get("DEVICE", "cuda")
         precision = os.environ.get("PRECISION")
         idle_timeout = active_runtime.initial_worker_idle_timeout()
-        worker = ModelWorker(
-            os.environ.get("MODEL_PATH", "/opt/models/amber-150m"),
-            device=device,
-            precision=precision,
-            idle_timeout=idle_timeout,
-        )
+        try:
+            worker = ModelWorker(
+                os.environ.get("MODEL_PATH", "/opt/models/amber-150m"),
+                device=device,
+                precision=precision,
+                idle_timeout=idle_timeout,
+            )
+        except BaseException:
+            if owns_store:
+                await anyio.to_thread.run_sync(store.close)
+            else:
+                await anyio.to_thread.run_sync(store.stop_background_flush)
+            raise
+
         active_runtime.attach_worker(worker)
         app.state.worker = worker
         app.state.runtime = active_runtime
@@ -161,7 +198,13 @@ def create_app(runtime: ChoiceRuntime | None = None):
         finally:
             active_runtime.detach_worker()
             with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(worker.close)
+                try:
+                    await anyio.to_thread.run_sync(worker.close)
+                finally:
+                    if owns_store:
+                        await anyio.to_thread.run_sync(store.close)
+                    else:
+                        await anyio.to_thread.run_sync(store.stop_background_flush)
 
     app = FastAPI(
         title="Choice API",
@@ -189,8 +232,10 @@ def create_app(runtime: ChoiceRuntime | None = None):
         swagger_ui_parameters={"defaultModelsExpandDepth": -1},
     )
     app.state.runtime = active_runtime
+    app.state.api_key_store = api_key_store
     app.add_middleware(_PublicClassifyLimitMiddleware, max_bytes=MAX_PUBLIC_BODY_BYTES)
     public_limiter = anyio.CapacityLimiter(PUBLIC_CLASSIFY_CONCURRENCY)
+    auth_db_limiter = anyio.CapacityLimiter(AUTH_DB_CONCURRENCY)
 
     @app.exception_handler(RecursionError)
     async def handle_recursion_error(_request: Request, _exc: RecursionError) -> JSONResponse:
@@ -199,18 +244,47 @@ def create_app(runtime: ChoiceRuntime | None = None):
     bearer = HTTPBearer(
         auto_error=False,
         scheme_name="BearerKey",
-        description="Any key configured in API_KEYS (or the legacy API_KEY setting)",
+        description="PostgreSQL-backed API key sent as `Authorization: Bearer <key>`",
+    )
+    api_key_header = APIKeyHeader(
+        name="X-API-Key",
+        auto_error=False,
+        scheme_name="ApiKeyHeader",
+        description="PostgreSQL-backed API key sent in the `X-API-Key` header",
     )
 
-    async def authenticate(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
-        valid_key = False
-        if credentials is not None:
-            provided_key = credentials.credentials.encode()
-            # Compare every configured key without stopping after a match.
-            for api_key in api_keys:
-                valid_key |= secrets.compare_digest(provided_key, api_key)
-        if not valid_key:
-            raise HTTPException(401, "Invalid or missing Bearer key", headers={"WWW-Authenticate": "Bearer"})
+    async def authenticate(
+        request: Request,
+        _credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)] = None,
+        _x_api_key: Annotated[str | None, Depends(api_key_header)] = None,
+    ):
+        raw_key = _extract_api_key(request)
+        if raw_key is None:
+            raise HTTPException(401, "Invalid or missing API key", headers={"WWW-Authenticate": "Bearer"})
+
+        store: APIKeyStore | None = getattr(app.state, "api_key_store", None)
+        if store is None:
+            raise HTTPException(503, "Authentication service is temporarily unavailable.")
+
+        state, payload = store.verify_key_fast(raw_key)
+        if state == "hit":
+            return
+        if state == "invalid":
+            raise HTTPException(401, "Invalid or missing API key", headers={"WWW-Authenticate": "Bearer"})
+
+        key_hash, gen_before = payload
+        try:
+            key_id = await anyio.to_thread.run_sync(
+                store.verify_key_miss,
+                key_hash,
+                gen_before,
+                limiter=auth_db_limiter,
+            )
+        except APIKeyStoreError as exc:
+            raise HTTPException(503, "Authentication service is temporarily unavailable.") from exc
+
+        if key_id is None:
+            raise HTTPException(401, "Invalid or missing API key", headers={"WWW-Authenticate": "Bearer"})
 
     async def require_accepting_requests():
         if not active_runtime.snapshot().accept_requests:
@@ -231,10 +305,10 @@ def create_app(runtime: ChoiceRuntime | None = None):
         tags=["Classification"],
         summary="Classify text against competing candidate labels",
         responses={
-            401: {"description": "Missing or invalid Bearer key"},
+            401: {"description": "Missing, invalid, revoked, or expired API key"},
             413: {"description": "Request body exceeds 128 KiB limit"},
             422: {"description": "Invalid input or prepared sequence exceeds 7,999 tokens"},
-            503: {"description": "Service is temporarily paused for maintenance or worker is unavailable"},
+            503: {"description": "Service is temporarily paused for maintenance or backend is unavailable"},
         },
     )
     async def classify(request: Request, body: ClassifyRequest):

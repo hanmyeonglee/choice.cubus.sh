@@ -70,7 +70,7 @@
         <h1>Send context.<br>Get decisions.</h1>
         <p class="intro">Classify text against competing candidate labels with Amber 150M. Supply bare label lists or descriptive candidate definitions with an optional question prompt.</p>
         <div class="actions"><a class="button" href="/docs">Open API docs →</a><a class="secondary" href="#quickstart">View request example</a></div>
-        <div class="endpoint"><span class="method">POST</span><code>/api/classify</code><span class="auth">Bearer authentication</span></div>
+        <div class="endpoint"><span class="method">POST</span><code>/api/classify</code><span class="auth">Bearer or X-API-Key authentication</span></div>
       </div>
       <div class="types">
         <article class="type"><h2>01 / text</h2><p>Send original prose, labeled sections, or structured JSON objects up to 8,000 characters by default (configurable up to 16,000).</p></article>
@@ -79,7 +79,7 @@
       </div>
       <section id="quickstart">
         <h2>Your first request</h2>
-        <p>Set <code>BASE_URL</code> to your service URL and <code>API_KEY</code> to your access key. The server accepts any key in its <code>API_KEYS</code> list. Send one key per request. You can also send requests using the Authorize button in the docs.</p>
+        <p>Set <code>BASE_URL</code> to your service URL and <code>API_KEY</code> to your issued <code>chk_…</code> API key. Pass it via <code>Authorization: Bearer $API_KEY</code> or <code>X-API-Key: $API_KEY</code>. You can also send requests using the Authorize button in the docs.</p>
         <pre><code>curl "$BASE_URL/api/classify" \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
@@ -118,7 +118,7 @@
         <div class="table-wrap"><table>
           <thead><tr><th>Method</th><th>Path</th><th>Purpose</th><th>Authentication</th></tr></thead>
           <tbody>
-            <tr><td>POST</td><td><code>/api/classify</code></td><td>Single-choice classification</td><td>Bearer key</td></tr>
+            <tr><td>POST</td><td><code>/api/classify</code></td><td>Single-choice classification</td><td>Bearer / <code>X-API-Key</code></td></tr>
             <tr><td>GET</td><td><code>/api/healthz</code></td><td>Readiness</td><td>None</td></tr>
           </tbody>
         </table></div>

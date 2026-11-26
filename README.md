@@ -16,7 +16,9 @@ Client → cubus shared ingress → FastAPI :8000 → Dynamic Micro-Batch Worker
 │   ├── __init__.py
 │   ├── __main__.py          # Server entry point (public API + optional Admin API)
 │   ├── admin.py             # Optional internal :9090 Admin API server & auth/CIDR guard
-│   ├── api.py               # Routes, authentication, and request handling
+│   ├── api.py               # Routes, DB-backed API key auth, and request handling
+│   ├── api_keys.py          # API key generation, SHA-256 hashing, bounded cache & usage batching
+│   ├── db.py                # PostgreSQL pool, db-broker bootstrap, and startup DDL migration
 │   ├── runtime.py           # Thread-safe live runtime settings & worker coordination
 │   ├── schemas.py           # Request/response schemas and input validation
 │   ├── model.py             # Model loading, token budget check, and classification
@@ -46,7 +48,7 @@ For isolated precision, format ablation, and System One model comparisons, see
 
 | Method / path | Purpose | Authentication |
 |---|---|---|
-| `POST /api/classify` | Classify text against 2–16 competing candidate labels | Bearer key |
+| `POST /api/classify` | Classify text against 2–16 competing candidate labels | Bearer / `X-API-Key` |
 | `GET /api/healthz` | Server readiness, model residency (`model_loaded`), and `model` ID | None |
 | `GET /` | Introduction and request example | None |
 | `GET /docs` | Swagger UI documentation and interactive requests | None |
@@ -72,20 +74,13 @@ The public endpoint is `https://choice.cubus.sh/api/classify`. You can also ente
 
 ### API keys
 
-Configure one or more keys in the server's `API_KEYS` environment variable, separated by commas:
+API keys are 100% PostgreSQL-backed (`.env` `API_KEYS` is not used). Keys are issued, listed, revoked, and deleted through the internal `:9090` Admin API (e.g. from `admin.cubus.sh`):
 
-```dotenv
-API_KEYS=replace-with-a-random-key,replace-with-another-random-key
-```
-
-Replace every placeholder with a separately generated key. Each client sends only its own key as `Authorization: Bearer <key>`; the request examples use the client's `API_KEY` variable for that value. Any configured key grants the same access to `/api/classify`.
-
-- Keys are generated and distributed manually; there are no accounts, login, or key issuance endpoints.
-- Surrounding whitespace and empty entries in the list are ignored. At least one real key is required, and placeholder keys beginning with `replace-with-` prevent startup.
-- `API_KEYS` takes precedence. The legacy `API_KEY` server setting is used only when `API_KEYS` is absent. An explicitly empty `API_KEYS` does not fall back to `API_KEY`.
-- Every configured key is compared with `secrets.compare_digest`, without stopping after a match. Missing or invalid credentials return 401.
-- Add, remove, or rotate keys by updating the server environment and recreating the container. Keys have no automatic expiration.
-- The homepage, docs, OpenAPI schema, and readiness endpoint remain public.
+- Generated keys use the format `chk_` + 32 URL-safe random bytes (~47 characters total). Only the 12-character prefix (`chk_XXXXXXXX`) and SHA-256 hex digest are stored in PostgreSQL; the plaintext key is returned once at creation time.
+- Clients authenticate to `POST /api/classify` with either `Authorization: Bearer <key>` or `X-API-Key: <key>`. Missing, malformed, unknown, revoked, or expired keys return `401`.
+- Verification uses a bounded short-TTL (15 s) in-memory cache of active key hashes (never negative-caching invalid keys) and batches `last_used_at` / `request_count` updates asynchronously (~5 s interval and on graceful shutdown) to avoid adding DB latency to inference requests.
+- Revoking or deleting a key via `:9090` invalidates the cache immediately.
+- The homepage, docs, OpenAPI schema, and readiness endpoint (`/api/healthz`) remain public.
 
 ### Request and response schema
 
@@ -124,27 +119,21 @@ Scores in this response example are illustrative:
 The Ubuntu x86_64 server requires an NVIDIA driver and NVIDIA Container Toolkit.
 
 ```bash
-docker build -t choice-api .
 cp .env.example .env
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+docker compose up --build -d
 ```
 
-Run the key generation command once per client and save the generated keys as a comma-separated `API_KEYS` value in `.env`. The server refuses to start if no keys are configured or any key is still a placeholder. `.env` is excluded from Git and the build context.
+Standalone local `docker-compose.yml` brings up a local `postgres:18.7-alpine3.24` instance alongside `choice` and wires `DATABASE_URL` automatically. Under `cubus.sh`, root `docker-compose.yml` injects `DB_BROKER_URL` so `choice` resolves its isolated `svc_choice` database credentials from `db-broker` at startup and runs the idempotent `api_keys` schema migration automatically.
 
-For direct access on the server, bind the port to loopback:
-
-```bash
-docker run --rm --name choice-api --gpus all \
-  --env-file .env -p 127.0.0.1:8000:8000 choice-api
-```
-
+- `DB_BROKER_URL`: production database credential broker endpoint injected by `cubus.sh` (`POST {}` with bounded exponential backoff + jitter on `503`/network errors; fail-fast on `400`/`403`/`409`). Takes precedence over `DATABASE_URL`.
+- `DATABASE_URL`: standalone PostgreSQL DSN used when `DB_BROKER_URL` is unset.
 - `DEVICE`: defaults to `cuda`. Set to `cpu` explicitly for CPU execution. CUDA mode refuses to start if no GPU is available.
 - `PRECISION`: defaults to `fp16` on `cuda` and `fp32` on `cpu`.
 - `IDLE_TIMEOUT_SECONDS`: defaults to `180` (3 minutes). The model loads in a dedicated dynamic micro-batching worker subprocess on the first classification request and terminates after `IDLE_TIMEOUT_SECONDS` of inactivity, releasing 100% of GPU VRAM (including the CUDA context). Set to `0` to pre-load on startup and keep the model resident permanently.
 - `MODEL_PATH`: defaults to `/opt/models/amber-150m`.
 - Model weights and tokenizer files are included in the image; there are no external downloads at runtime.
 - uv is used only to install locked dependencies during the build. The runtime image does not include uv.
-- Uses PyTorch 2.7.1+cu126, Transformers 5.16.1, Safetensors 0.8.0, FastAPI 0.143.3, and Uvicorn 0.54.0. All dependencies are pinned in `uv.lock`.
+- Uses PyTorch 2.7.1+cu126, Transformers 5.16.1, Safetensors 0.8.0, FastAPI 0.143.3, Uvicorn 0.54.0, and `psycopg[binary,pool]` 3.3.9. All dependencies are pinned in `uv.lock`.
 - Model revision: `51ee1bba1f9e71aae4bf65bde1d43216260b6aab`.
 
 ### Optional Internal Admin API (`:9090`)
@@ -158,10 +147,14 @@ Set `ADMIN_API_TOKEN` (minimum 16 bytes, not a `replace-with-*` placeholder) to 
 
 Endpoints:
 
-- `GET /admin/v1/manifest`: service capabilities and settings schema (`service: "choice"`, `version: "0.3.0"`, `model: "amber-150m"`, `capabilities: ["settings", "classify"]`).
+- `GET /admin/v1/manifest`: service capabilities and settings schema (`service: "choice"`, `version: "0.3.0"`, `model: "amber-150m"`, `capabilities: ["settings", "classify", "api_keys"]`).
 - `GET /admin/v1/settings`: current runtime values (`accept_requests`, `idle_timeout_seconds`, `max_text_chars`, `max_labels`; never exposes secrets).
 - `PATCH /admin/v1/settings`: atomically validates and applies runtime settings live (`accept_requests=false` makes `POST /api/classify` return `503` while `/api/healthz` and the Admin API stay up; `idle_timeout_seconds` dynamically updates worker eviction).
 - `POST /admin/v1/classify/batch`: internal batch classification endpoint sharing the single `ModelWorker` instance (up to 256 KiB JSON payload, 1–64 items of 1–4,000 chars each, optional `prompt` up to 512 chars, optional `task` up to 64 chars, `2–16` labels with optional descriptions up to 240 chars). Isolates per-item token-limit/model errors without failing the rest of the batch and stays available even when `accept_requests=false`.
+- `GET /admin/v1/api-keys`: lists API key metadata (`id`, `name`, `owner`, `key_prefix`, effective `status` of `active`/`revoked`/`expired`, `expires_at`, `last_used_at`, `request_count`, `created_by`, `created_at`, `revoked_at`; never returns `key_hash` or plaintext).
+- `POST /admin/v1/api-keys`: creates a new API key (`name`, optional `owner`, `expires_in_days` in `30|90|365|null`, optional `created_by`), returning HTTP `201` with one-time `api_key` plaintext and `record`.
+- `POST /admin/v1/api-keys/{id}/revoke`: marks a key `revoked`, immediately invalidates the auth cache, and returns the updated record (`404` if not found).
+- `DELETE /admin/v1/api-keys/{id}`: deletes a key, immediately invalidates the auth cache, and returns `{"deleted": true, "id": "..."}` (`404` if not found).
 
 ## cubus deployment contract
 
@@ -170,11 +163,12 @@ Endpoints:
 | Dockerfile / build context | Root `Dockerfile` / repository root |
 | Service compose | `compose.service.yml` (`choice` service, extended by `cubus.sh`; exposes `8000` and optional internal `9090`) |
 | Listener / intended hostname | `0.0.0.0:8000` / `choice.cubus.sh` (plus optional `ADMIN_BIND_CIDR:9090` internal Admin API) |
-| Internal network | Shared `web` (plus optional internal `admin` when Admin API is enabled) |
+| Internal network | Shared `web`, `db`, and optional internal `admin` when Admin API is enabled |
 | Proxy metadata | `VIRTUAL_HOST=choice.cubus.sh`, `VIRTUAL_PORT=8000` |
+| Database | Internal PostgreSQL via `DB_BROKER_URL` (`svc_choice`) in `cubus.sh`, or `DATABASE_URL` standalone |
 | GPU | GPU allocation through NVIDIA Container Toolkit |
-| Required secret | Runtime `API_KEYS` (legacy `API_KEY` accepted when `API_KEYS` is absent) |
-| Persistent storage | None; model files are included in the image |
+| Required secret | Optional `ADMIN_API_TOKEN` for `:9090` Admin API (public API keys are stored hashed in PostgreSQL) |
+| Persistent storage | PostgreSQL (`api_keys` table); model files are included in the image |
 | Writable paths | `/tmp` and temporary/cache files in the container user's home |
 | Build outbound access | PyPI, PyTorch wheel repository, Hugging Face, and download CDNs |
 | Runtime outbound access | None required by the server; the browser fetches Swagger UI JS and CSS from a CDN |

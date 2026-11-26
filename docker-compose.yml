@@ -1,7 +1,31 @@
 services:
+  postgres:
+    image: postgres:18.7-alpine3.24
+    environment:
+      POSTGRES_USER: choice
+      POSTGRES_DB: choice
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-choice-local-dev}
+      POSTGRES_INITDB_ARGS: "--locale-provider=builtin --locale=C.UTF-8 --encoding=UTF8"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "choice", "-d", "choice"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - choice-pgdata:/var/lib/postgresql
+
   choice:
     extends:
       file: compose.service.yml
       service: choice
+    environment:
+      DATABASE_URL: postgresql://choice:${POSTGRES_PASSWORD:-choice-local-dev}@postgres:5432/choice?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+
+volumes:
+  choice-pgdata:

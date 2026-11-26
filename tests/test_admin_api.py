@@ -26,13 +26,20 @@ from app.admin import (
     load_admin_config,
     resolve_bind_addr,
 )
-from app.api import create_app, load_api_keys
+from app.api import create_app
+from app.api_keys import APIKeyStore, InMemoryAPIKeyBackend
+from app.db import DatabaseConfigError, resolve_database_config
 from app.runtime import APP_VERSION, MODEL_ID, SETTINGS_SCHEMA, ChoiceRuntime
 from app.worker import ModelWorker, WorkerInputTooLongError
 
 
 VALID_TOKEN = "choice-admin-secret-token-123456"
-PUBLIC_KEY = "choice-public-api-key-abcdef123456"
+
+
+def _make_store_with_key() -> tuple[APIKeyStore, str]:
+    store = APIKeyStore(InMemoryAPIKeyBackend())
+    plaintext, _record = store.create_key(name="admin-test-key", owner="tests", created_by="suite")
+    return store, plaintext
 
 
 class _FakeWorker:
@@ -196,12 +203,13 @@ class AdminConfigAndBindTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_admin_config({"ADMIN_ALLOW_CIDR": bad_cidr})
 
-    def test_main_validates_api_keys_before_opening_admin_port(self) -> None:
+    def test_main_validates_database_config_before_opening_admin_port(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(
                 os.environ,
                 {
-                    "API_KEYS": "replace-with-a-random-key",
+                    "DB_BROKER_URL": "",
+                    "DATABASE_URL": "",
                     "ADMIN_API_TOKEN": VALID_TOKEN,
                     "MODEL_PATH": tmpdir,
                 },
@@ -213,8 +221,8 @@ class AdminConfigAndBindTests(unittest.TestCase):
                     self.assertEqual(cm.exception.code, 1)
                     mock_build.assert_not_called()
 
-        with self.assertRaises(RuntimeError):
-            load_api_keys({"API_KEYS": ""})
+        with self.assertRaises(DatabaseConfigError):
+            resolve_database_config({})
 
     def test_resolve_bind_addr(self) -> None:
         self.assertEqual(resolve_bind_addr(None, 9090), ("127.0.0.1", 9090))
@@ -423,13 +431,17 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(man["service"], "choice")
             self.assertEqual(man["version"], APP_VERSION)
             self.assertEqual(man["model"], MODEL_ID)
-            self.assertEqual(man["capabilities"], ["settings", "classify"])
+            self.assertEqual(man["capabilities"], ["settings", "classify", "api_keys"])
             self.assertEqual(
                 man["endpoints"],
                 {
                     "settings_get": "GET /admin/v1/settings",
                     "settings_update": "PATCH /admin/v1/settings",
                     "classify_batch": "POST /admin/v1/classify/batch",
+                    "api_keys_list": "GET /admin/v1/api-keys",
+                    "api_keys_create": "POST /admin/v1/api-keys",
+                    "api_keys_revoke": "POST /admin/v1/api-keys/{id}/revoke",
+                    "api_keys_delete": "DELETE /admin/v1/api-keys/{id}",
                 },
             )
             self.assertEqual(man["settings_schema"], list(SETTINGS_SCHEMA))
@@ -712,105 +724,105 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
         runtime = ChoiceRuntime()
         fake_worker = _FakeWorker(idle_timeout=180.0)
         admin_cfg = load_admin_config({"ADMIN_API_TOKEN": VALID_TOKEN})
+        store, public_key = _make_store_with_key()
 
-        with patch.dict(os.environ, {"API_KEYS": PUBLIC_KEY}, clear=False):
-            with patch("app.api.ModelWorker", return_value=fake_worker):
-                public_app = create_app(runtime=runtime)
-                admin_app = create_admin_app(runtime=runtime, config=admin_cfg)
+        with patch("app.api.ModelWorker", return_value=fake_worker):
+            public_app = create_app(runtime=runtime, api_key_store=store)
+            admin_app = create_admin_app(runtime=runtime, config=admin_cfg, api_key_store=store)
 
-                async with public_app.router.lifespan_context(public_app):
-                    async with (
-                        httpx.AsyncClient(
-                            transport=httpx.ASGITransport(app=public_app, client=("127.0.0.1", 50001)),
-                            base_url="http://public.local",
-                        ) as pub_cli,
-                        httpx.AsyncClient(
-                            transport=httpx.ASGITransport(app=admin_app, client=("127.0.0.1", 50002)),
-                            base_url="http://admin.local",
-                        ) as adm_cli,
-                    ):
-                        pub_headers = {"Authorization": f"Bearer {PUBLIC_KEY}"}
-                        adm_headers = {"Authorization": f"Bearer {VALID_TOKEN}"}
+            async with public_app.router.lifespan_context(public_app):
+                async with (
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=public_app, client=("127.0.0.1", 50001)),
+                        base_url="http://public.local",
+                    ) as pub_cli,
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=admin_app, client=("127.0.0.1", 50002)),
+                        base_url="http://admin.local",
+                    ) as adm_cli,
+                ):
+                    pub_headers = {"Authorization": f"Bearer {public_key}"}
+                    adm_headers = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
-                        # Public app must NOT expose admin routes.
-                        self.assertEqual((await pub_cli.get("/admin/v1/manifest")).status_code, 404)
+                    # Public app must NOT expose admin routes.
+                    self.assertEqual((await pub_cli.get("/admin/v1/manifest")).status_code, 404)
 
-                        # Normal classify works.
-                        ok = await pub_cli.post(
-                            "/api/classify",
-                            headers=pub_headers,
-                            json={"text": "x" * 200, "labels": ["a", "b", "c", "d"]},
-                        )
-                        self.assertEqual(ok.status_code, 200)
-                        self.assertEqual(ok.json()["choice"], "a")
+                    # Normal classify works.
+                    ok = await pub_cli.post(
+                        "/api/classify",
+                        headers=pub_headers,
+                        json={"text": "x" * 200, "labels": ["a", "b", "c", "d"]},
+                    )
+                    self.assertEqual(ok.status_code, 200)
+                    self.assertEqual(ok.json()["choice"], "a")
 
-                        # Lower max_text_chars=120 and max_labels=3 via Admin API.
-                        patch_limits = await adm_cli.patch(
-                            "/admin/v1/settings",
-                            headers=adm_headers,
-                            json={"max_text_chars": 120, "max_labels": 3, "idle_timeout_seconds": 45},
-                        )
-                        self.assertEqual(patch_limits.status_code, 200)
-                        self.assertEqual(fake_worker.idle_timeout, 45.0)
+                    # Lower max_text_chars=120 and max_labels=3 via Admin API.
+                    patch_limits = await adm_cli.patch(
+                        "/admin/v1/settings",
+                        headers=adm_headers,
+                        json={"max_text_chars": 120, "max_labels": 3, "idle_timeout_seconds": 45},
+                    )
+                    self.assertEqual(patch_limits.status_code, 200)
+                    self.assertEqual(fake_worker.idle_timeout, 45.0)
 
-                        too_long = await pub_cli.post(
-                            "/api/classify",
-                            headers=pub_headers,
-                            json={"text": "x" * 121, "labels": ["a", "b"]},
-                        )
-                        self.assertEqual(too_long.status_code, 422)
+                    too_long = await pub_cli.post(
+                        "/api/classify",
+                        headers=pub_headers,
+                        json={"text": "x" * 121, "labels": ["a", "b"]},
+                    )
+                    self.assertEqual(too_long.status_code, 422)
 
-                        too_many_labels = await pub_cli.post(
-                            "/api/classify",
-                            headers=pub_headers,
-                            json={"text": "x" * 100, "labels": ["a", "b", "c", "d"]},
-                        )
-                        self.assertEqual(too_many_labels.status_code, 422)
+                    too_many_labels = await pub_cli.post(
+                        "/api/classify",
+                        headers=pub_headers,
+                        json={"text": "x" * 100, "labels": ["a", "b", "c", "d"]},
+                    )
+                    self.assertEqual(too_many_labels.status_code, 422)
 
-                        within_limits = await pub_cli.post(
-                            "/api/classify",
-                            headers=pub_headers,
-                            json={"text": "x" * 120, "labels": ["a", "b", "c"]},
-                        )
-                        self.assertEqual(within_limits.status_code, 200)
+                    within_limits = await pub_cli.post(
+                        "/api/classify",
+                        headers=pub_headers,
+                        json={"text": "x" * 120, "labels": ["a", "b", "c"]},
+                    )
+                    self.assertEqual(within_limits.status_code, 200)
 
-                        # Pause requests via accept_requests=false -> /api/classify 503, /api/healthz 200.
-                        paused = await adm_cli.patch(
-                            "/admin/v1/settings",
-                            headers=adm_headers,
-                            json={"accept_requests": False},
-                        )
-                        self.assertEqual(paused.status_code, 200)
+                    # Pause requests via accept_requests=false -> /api/classify 503, /api/healthz 200.
+                    paused = await adm_cli.patch(
+                        "/admin/v1/settings",
+                        headers=adm_headers,
+                        json={"accept_requests": False},
+                    )
+                    self.assertEqual(paused.status_code, 200)
 
-                        r503 = await pub_cli.post(
-                            "/api/classify",
-                            headers=pub_headers,
-                            json={"text": "ok", "labels": ["a", "b"]},
-                        )
-                        self.assertEqual(r503.status_code, 503)
+                    r503 = await pub_cli.post(
+                        "/api/classify",
+                        headers=pub_headers,
+                        json={"text": "ok", "labels": ["a", "b"]},
+                    )
+                    self.assertEqual(r503.status_code, 503)
 
-                        # Unauthenticated request still returns 401 even while paused.
-                        r401 = await pub_cli.post("/api/classify", json={"text": "ok", "labels": ["a", "b"]})
-                        self.assertEqual(r401.status_code, 401)
+                    # Unauthenticated request still returns 401 even while paused.
+                    r401 = await pub_cli.post("/api/classify", json={"text": "ok", "labels": ["a", "b"]})
+                    self.assertEqual(r401.status_code, 401)
 
-                        # Healthz and Admin API stay up.
-                        hz = await pub_cli.get("/api/healthz")
-                        self.assertEqual(hz.status_code, 200)
-                        self.assertEqual(hz.json()["ok"], True)
+                    # Healthz and Admin API stay up.
+                    hz = await pub_cli.get("/api/healthz")
+                    self.assertEqual(hz.status_code, 200)
+                    self.assertEqual(hz.json()["ok"], True)
 
-                        # Re-enable requests -> /api/classify recovers immediately.
-                        resumed = await adm_cli.patch(
-                            "/admin/v1/settings",
-                            headers=adm_headers,
-                            json={"accept_requests": True},
-                        )
-                        self.assertEqual(resumed.status_code, 200)
-                        r200 = await pub_cli.post(
-                            "/api/classify",
-                            headers=pub_headers,
-                            json={"text": "ok", "labels": ["a", "b"]},
-                        )
-                        self.assertEqual(r200.status_code, 200)
+                    # Re-enable requests -> /api/classify recovers immediately.
+                    resumed = await adm_cli.patch(
+                        "/admin/v1/settings",
+                        headers=adm_headers,
+                        json={"accept_requests": True},
+                    )
+                    self.assertEqual(resumed.status_code, 200)
+                    r200 = await pub_cli.post(
+                        "/api/classify",
+                        headers=pub_headers,
+                        json={"text": "ok", "labels": ["a", "b"]},
+                    )
+                    self.assertEqual(r200.status_code, 200)
 
     def test_worker_set_idle_timeout_behaviors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -887,77 +899,77 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         slow_worker = _SlowWorker()
         admin_cfg = load_admin_config({"ADMIN_API_TOKEN": VALID_TOKEN})
+        store, public_key = _make_store_with_key()
 
-        with patch.dict(os.environ, {"API_KEYS": PUBLIC_KEY}, clear=False):
-            with patch("app.api.ModelWorker", return_value=slow_worker):
-                public_app = create_app(runtime=runtime)
-                admin_app = create_admin_app(runtime=runtime, config=admin_cfg)
+        with patch("app.api.ModelWorker", return_value=slow_worker):
+            public_app = create_app(runtime=runtime, api_key_store=store)
+            admin_app = create_admin_app(runtime=runtime, config=admin_cfg, api_key_store=store)
 
-                async with public_app.router.lifespan_context(public_app):
-                    async with (
-                        httpx.AsyncClient(
-                            transport=httpx.ASGITransport(app=public_app, client=("127.0.0.1", 50001)),
-                            base_url="http://public.local",
-                        ) as pub_cli,
-                        httpx.AsyncClient(
-                            transport=httpx.ASGITransport(app=admin_app, client=("127.0.0.1", 50002)),
-                            base_url="http://admin.local",
-                        ) as adm_cli,
-                    ):
-                        pub_headers = {"Authorization": f"Bearer {PUBLIC_KEY}"}
-                        adm_headers = {"Authorization": f"Bearer {VALID_TOKEN}"}
+            async with public_app.router.lifespan_context(public_app):
+                async with (
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=public_app, client=("127.0.0.1", 50001)),
+                        base_url="http://public.local",
+                    ) as pub_cli,
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=admin_app, client=("127.0.0.1", 50002)),
+                        base_url="http://admin.local",
+                    ) as adm_cli,
+                ):
+                    pub_headers = {"Authorization": f"Bearer {public_key}"}
+                    adm_headers = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
-                        # Saturate all 24 public classify slots + block an idle_timeout patch.
-                        pub_tasks = [
-                            asyncio.create_task(
-                                pub_cli.post(
-                                    "/api/classify",
-                                    headers=pub_headers,
-                                    json={"text": f"slow-{i}", "labels": ["a", "b"]},
-                                )
-                            )
-                            for i in range(25)
-                        ]
-                        while not entered_public.is_set():
-                            await asyncio.sleep(0.01)
-
-                        idle_patch_task = asyncio.create_task(
-                            adm_cli.patch(
-                                "/admin/v1/settings",
-                                headers=adm_headers,
-                                json={"idle_timeout_seconds": 30},
+                    # Saturate all 24 public classify slots + block an idle_timeout patch.
+                    pub_tasks = [
+                        asyncio.create_task(
+                            pub_cli.post(
+                                "/api/classify",
+                                headers=pub_headers,
+                                json={"text": f"slow-{i}", "labels": ["a", "b"]},
                             )
                         )
-                        while not entered_timeout.is_set():
-                            await asyncio.sleep(0.01)
+                        for i in range(25)
+                    ]
+                    while not entered_public.is_set():
+                        await asyncio.sleep(0.01)
 
-                        # Admin accept_requests=false & classify/batch MUST respond immediately without hanging!
-                        r_pause = await asyncio.wait_for(
-                            adm_cli.patch(
-                                "/admin/v1/settings",
-                                headers=adm_headers,
-                                json={"accept_requests": False},
-                            ),
-                            timeout=2.0,
+                    idle_patch_task = asyncio.create_task(
+                        adm_cli.patch(
+                            "/admin/v1/settings",
+                            headers=adm_headers,
+                            json={"idle_timeout_seconds": 30},
                         )
-                        self.assertEqual(r_pause.status_code, 200)
-                        self.assertFalse(r_pause.json()["accept_requests"])
+                    )
+                    while not entered_timeout.is_set():
+                        await asyncio.sleep(0.01)
 
-                        r_batch = await asyncio.wait_for(
-                            adm_cli.post(
-                                "/admin/v1/classify/batch",
-                                headers=adm_headers,
-                                json={"labels": ["normal", "alert"], "items": [{"id": "1", "text": "triage"}]},
-                            ),
-                            timeout=2.0,
-                        )
-                        self.assertEqual(r_batch.status_code, 200)
+                    # Admin accept_requests=false & classify/batch MUST respond immediately without hanging!
+                    r_pause = await asyncio.wait_for(
+                        adm_cli.patch(
+                            "/admin/v1/settings",
+                            headers=adm_headers,
+                            json={"accept_requests": False},
+                        ),
+                        timeout=2.0,
+                    )
+                    self.assertEqual(r_pause.status_code, 200)
+                    self.assertFalse(r_pause.json()["accept_requests"])
 
-                        release_timeout.set()
-                        release_public.set()
-                        await asyncio.wait_for(idle_patch_task, timeout=2.0)
-                        pub_resps = await asyncio.wait_for(asyncio.gather(*pub_tasks), timeout=5.0)
-                        self.assertTrue(all(r.status_code in (200, 503) for r in pub_resps))
+                    r_batch = await asyncio.wait_for(
+                        adm_cli.post(
+                            "/admin/v1/classify/batch",
+                            headers=adm_headers,
+                            json={"labels": ["normal", "alert"], "items": [{"id": "1", "text": "triage"}]},
+                        ),
+                        timeout=2.0,
+                    )
+                    self.assertEqual(r_batch.status_code, 200)
+
+                    release_timeout.set()
+                    release_public.set()
+                    await asyncio.wait_for(idle_patch_task, timeout=2.0)
+                    pub_resps = await asyncio.wait_for(asyncio.gather(*pub_tasks), timeout=5.0)
+                    self.assertTrue(all(r.status_code in (200, 503) for r in pub_resps))
 
     async def test_admin_settings_limiter_isolated_from_classify_batch_saturation(self) -> None:
         runtime = ChoiceRuntime()
@@ -1053,12 +1065,12 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = ChoiceRuntime()
         fake_worker = _FakeWorker(idle_timeout=180.0)
+        store, public_key = _make_store_with_key()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(
                 os.environ,
                 {
-                    "API_KEYS": PUBLIC_KEY,
                     "FORWARDED_ALLOW_IPS": "*",
                     "ADMIN_API_TOKEN": VALID_TOKEN,
                     "ADMIN_PORT": str(admin_port),
@@ -1071,6 +1083,7 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     servers = build_servers(
                         runtime=runtime,
                         admin_config=admin_cfg,
+                        api_key_store=store,
                         main_host="127.0.0.1",
                         main_port=main_port,
                         admin_host="127.0.0.1",
@@ -1117,7 +1130,7 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
                             r_cls = await cli.post(
                                 f"http://127.0.0.1:{main_port}/api/classify",
-                                headers={"Authorization": f"Bearer {PUBLIC_KEY}"},
+                                headers={"Authorization": f"Bearer {public_key}"},
                                 json={"text": "hello world", "labels": ["a", "b"]},
                             )
                             self.assertEqual(r_cls.status_code, 503)
@@ -1150,12 +1163,12 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = ChoiceRuntime()
         fake_worker = _FakeWorker(idle_timeout=180.0)
+        store, _ = _make_store_with_key()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(
                 os.environ,
                 {
-                    "API_KEYS": PUBLIC_KEY,
                     "ADMIN_API_TOKEN": VALID_TOKEN,
                     "ADMIN_PORT": str(admin_port),
                     "MODEL_PATH": tmpdir,
@@ -1166,6 +1179,7 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     servers = build_servers(
                         runtime=runtime,
                         admin_config=load_admin_config(),
+                        api_key_store=store,
                         main_host="127.0.0.1",
                         main_port=main_port,
                         admin_host="127.0.0.1",

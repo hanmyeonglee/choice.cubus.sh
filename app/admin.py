@@ -21,6 +21,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .api_keys import (
+    APIKeyStore,
+    APIKeyStoreError,
+    APIKeyValidationError,
+    parse_api_key_uuid,
+    validate_create_api_key_payload,
+)
 from .runtime import APP_VERSION, MAIN_PORT, MODEL_ID, SETTINGS_SCHEMA, ChoiceRuntime, SettingsValidationError
 from .worker import WorkerCancelledError
 
@@ -310,9 +317,11 @@ def _parse_strict_json_object(raw_body: bytes, context: str = "settings patch") 
 
 
 async def _read_bounded_json_object(request: Request, max_bytes: int, context: str) -> dict[str, Any]:
-    raw_cl = request.headers.get("content-length")
-    if raw_cl is not None:
-        cl_str = raw_cl.strip()
+    cl_values = request.headers.getlist("content-length")
+    if len(cl_values) > 1:
+        raise _AdminBodyError(400, "invalid Content-Length header")
+    if len(cl_values) == 1:
+        cl_str = cl_values[0].strip()
         if not cl_str.isascii() or not cl_str.isdigit():
             raise _AdminBodyError(400, "invalid Content-Length header")
         if int(cl_str) > max_bytes:
@@ -518,7 +527,11 @@ class _AdminGuardMiddleware:
         await self._app(scope, receive, send_with_security_headers)
 
 
-def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
+def create_admin_app(
+    runtime: ChoiceRuntime,
+    config: AdminConfig,
+    api_key_store: APIKeyStore | None = None,
+) -> Any:
     """Build the isolated internal Admin API ASGI application."""
     if not config.enabled:
         raise ValueError("Admin API cannot be created without a validated ADMIN_API_TOKEN.")
@@ -530,9 +543,10 @@ def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
         redoc_url=None,
         openapi_url=None,
     )
-    # Separate limiters keep :8000 saturation and heavy :9090 batch inference from starving emergency settings updates.
+    # Separate limiters keep :8000 saturation and heavy :9090 batch inference from starving emergency settings or key ops.
     settings_limiter = anyio.CapacityLimiter(4)
     classify_limiter = anyio.CapacityLimiter(4)
+    api_keys_limiter = anyio.CapacityLimiter(4)
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_exception(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -548,14 +562,104 @@ def create_admin_app(runtime: ChoiceRuntime, config: AdminConfig) -> Any:
             "service": "choice",
             "version": APP_VERSION,
             "model": MODEL_ID,
-            "capabilities": ["settings", "classify"],
+            "capabilities": ["settings", "classify", "api_keys"],
             "endpoints": {
                 "settings_get": "GET /admin/v1/settings",
                 "settings_update": "PATCH /admin/v1/settings",
                 "classify_batch": "POST /admin/v1/classify/batch",
+                "api_keys_list": "GET /admin/v1/api-keys",
+                "api_keys_create": "POST /admin/v1/api-keys",
+                "api_keys_revoke": "POST /admin/v1/api-keys/{id}/revoke",
+                "api_keys_delete": "DELETE /admin/v1/api-keys/{id}",
             },
             "settings_schema": [dict(item) for item in SETTINGS_SCHEMA],
         }
+
+    @app.get("/admin/v1/api-keys")
+    async def list_api_keys() -> JSONResponse:
+        if api_key_store is None:
+            return _error_response(503, "api key store unavailable")
+        try:
+            records = await anyio.to_thread.run_sync(api_key_store.list_keys, limiter=api_keys_limiter)
+        except APIKeyStoreError:
+            return _error_response(503, "api key store unavailable")
+        return JSONResponse(status_code=200, content={"api_keys": records})
+
+    @app.post("/admin/v1/api-keys")
+    async def create_api_key(request: Request) -> JSONResponse:
+        try:
+            parsed = await _read_bounded_json_object(request, MAX_ADMIN_BODY_BYTES, "api key create")
+            name, owner, expires_in_days, created_by = validate_create_api_key_payload(parsed)
+        except _AdminBodyError as exc:
+            return _error_response(exc.status_code, str(exc))
+        except APIKeyValidationError as exc:
+            return _error_response(400, str(exc))
+
+        if api_key_store is None:
+            return _error_response(503, "api key store unavailable")
+
+        def _create() -> tuple[str, dict[str, Any]]:
+            return api_key_store.create_key(
+                name=name,
+                owner=owner,
+                expires_in_days=expires_in_days,
+                created_by=created_by,
+            )
+
+        try:
+            plaintext, record = await anyio.to_thread.run_sync(_create, limiter=api_keys_limiter)
+        except APIKeyStoreError:
+            return _error_response(503, "api key store unavailable")
+
+        return JSONResponse(status_code=201, content={"api_key": plaintext, "record": record})
+
+    @app.post("/admin/v1/api-keys/{key_id}/revoke")
+    async def revoke_api_key(key_id: str, request: Request) -> JSONResponse:
+        cl_values = request.headers.getlist("content-length")
+        if len(cl_values) > 1:
+            return _error_response(400, "invalid Content-Length header")
+        if len(cl_values) == 1:
+            cl_str = cl_values[0].strip()
+            if not cl_str.isascii() or not cl_str.isdigit():
+                return _error_response(400, "invalid Content-Length header")
+            if int(cl_str) > MAX_ADMIN_BODY_BYTES:
+                return _error_response(413, "request body too large")
+
+        try:
+            parsed_id = parse_api_key_uuid(key_id)
+        except APIKeyValidationError as exc:
+            return _error_response(400, str(exc))
+
+        if api_key_store is None:
+            return _error_response(503, "api key store unavailable")
+
+        try:
+            updated = await anyio.to_thread.run_sync(api_key_store.revoke_key, parsed_id, limiter=api_keys_limiter)
+        except APIKeyStoreError:
+            return _error_response(503, "api key store unavailable")
+
+        if updated is None:
+            return _error_response(404, "api key not found")
+        return JSONResponse(status_code=200, content=updated)
+
+    @app.delete("/admin/v1/api-keys/{key_id}")
+    async def delete_api_key(key_id: str) -> JSONResponse:
+        try:
+            parsed_id = parse_api_key_uuid(key_id)
+        except APIKeyValidationError as exc:
+            return _error_response(400, str(exc))
+
+        if api_key_store is None:
+            return _error_response(503, "api key store unavailable")
+
+        try:
+            deleted = await anyio.to_thread.run_sync(api_key_store.delete_key, parsed_id, limiter=api_keys_limiter)
+        except APIKeyStoreError:
+            return _error_response(503, "api key store unavailable")
+
+        if not deleted:
+            return _error_response(404, "api key not found")
+        return JSONResponse(status_code=200, content={"deleted": True, "id": str(parsed_id)})
 
     @app.get("/admin/v1/settings")
     async def get_settings() -> dict[str, bool | int]:

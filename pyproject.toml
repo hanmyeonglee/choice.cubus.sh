@@ -9,6 +9,7 @@ dependencies = [
     "transformers==5.16.1",
     "safetensors==0.8.0",
     "torch==2.7.1+cu126",
+    "psycopg[binary,pool]==3.3.9",
 ]
 
 [tool.uv]

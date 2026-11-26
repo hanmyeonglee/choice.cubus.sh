@@ -13,7 +13,9 @@ from typing import Iterator
 import uvicorn
 
 from .admin import AdminConfig, create_admin_app, load_admin_config, resolve_bind_addr
-from .api import create_app, load_api_keys
+from .api import create_app
+from .api_keys import APIKeyStore
+from .db import create_postgres_api_key_store
 from .runtime import MAIN_PORT, ChoiceRuntime
 from .worker import validate_runtime_config
 
@@ -30,12 +32,13 @@ def build_servers(
     *,
     runtime: ChoiceRuntime,
     admin_config: AdminConfig,
+    api_key_store: APIKeyStore | None = None,
     main_host: str = "0.0.0.0",
     main_port: int = MAIN_PORT,
     admin_host: str | None = None,
 ) -> list[_ManagedServer]:
     """Construct the public server and, when enabled, the internal Admin API server."""
-    main_app = create_app(runtime=runtime)
+    main_app = create_app(runtime=runtime, api_key_store=api_key_store)
     main_cfg = uvicorn.Config(
         main_app,
         host=main_host,
@@ -52,7 +55,11 @@ def build_servers(
             if admin_host is not None
             else resolve_bind_addr(admin_config.bind_cidr, admin_config.port)
         )
-        admin_app = create_admin_app(runtime=runtime, config=admin_config)
+        admin_app = create_admin_app(
+            runtime=runtime,
+            config=admin_config,
+            api_key_store=api_key_store,
+        )
         admin_cfg = uvicorn.Config(
             admin_app,
             host=resolved_host,
@@ -131,8 +138,8 @@ async def serve_servers(servers: list[_ManagedServer]) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    api_key_store: APIKeyStore | None = None
     try:
-        load_api_keys()
         runtime = ChoiceRuntime.from_env()
         validate_runtime_config(
             os.environ.get("MODEL_PATH", "/opt/models/amber-150m"),
@@ -141,8 +148,15 @@ def main() -> None:
             idle_timeout=runtime.initial_worker_idle_timeout(),
         )
         admin_config = load_admin_config()
-        servers = build_servers(runtime=runtime, admin_config=admin_config)
+        api_key_store = create_postgres_api_key_store()
+        servers = build_servers(
+            runtime=runtime,
+            admin_config=admin_config,
+            api_key_store=api_key_store,
+        )
     except Exception as exc:
+        if api_key_store is not None:
+            api_key_store.close()
         logging.error("Configuration error: %s", exc)
         sys.exit(1)
 
@@ -155,7 +169,10 @@ def main() -> None:
     else:
         logging.info("Internal admin API disabled (ADMIN_API_TOKEN not set)")
 
-    asyncio.run(serve_servers(servers))
+    try:
+        asyncio.run(serve_servers(servers))
+    finally:
+        api_key_store.close()
 
 
 if __name__ == "__main__":
