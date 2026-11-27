@@ -14,6 +14,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from app.runtime import BGE_M3_MODEL_ID, MODEL_ID, resolve_model_paths, should_validate_all_model_paths
 from app.worker import ModelWorker, WorkerCancelledError, WorkerInputTooLongError, _worker_main
 
 
@@ -126,8 +127,12 @@ class _FakeWorkerIPC:
         self.startup_recv_exc = startup_recv_exc
         self.ignore_terminate = ignore_terminate
         self.spawn_count = 0
+        self.spawned_paths: list[str] = []
+        self.active_alive_count = 0
+        self.max_concurrent_alive = 0
         self.batch_sizes: list[int] = []
         self.ipc_messages: list[object] = []
+        self.ipc_by_path: list[tuple[str, list[tuple[object, ...]]]] = []
         self.terminated_count = 0
         self.killed_count = 0
         self.closed_procs = 0
@@ -161,99 +166,112 @@ class _FakeWorkerIPC:
     def Process(self, target, args, daemon=True):
         raw_child_conn, model_path, device, precision = args
         child_conn = raw_child_conn.dup()
-        del target, model_path, device, precision, daemon
+        del target, device, precision, daemon
         ipc = self
 
         class _Proc:
             def __init__(self) -> None:
                 with ipc._lock:
                     ipc.spawn_count += 1
+                    ipc.spawned_paths.append(model_path)
                     self.pid = 40000 + ipc.spawn_count
+                self.model_path = model_path
                 self._alive = False
+                self._counted_alive = False
                 self._stop_ev = threading.Event()
                 self.closed = False
                 self._thread = threading.Thread(target=self._run, daemon=True)
                 with ipc._lock:
                     ipc.procs.append(self)
 
+            def _mark_dead(self) -> None:
+                with ipc._lock:
+                    self._alive = False
+                    if self._counted_alive:
+                        self._counted_alive = False
+                        ipc.active_alive_count -= 1
+
             def _run(self) -> None:
-                ipc.startup_entered.set()
-                if ipc.startup_gate is not None:
-                    while not ipc.startup_gate.is_set() and not self._stop_ev.is_set():
-                        ipc.startup_gate.wait(timeout=0.02)
-                    if self._stop_ev.is_set():
+                try:
+                    ipc.startup_entered.set()
+                    if ipc.startup_gate is not None:
+                        while not ipc.startup_gate.is_set() and not self._stop_ev.is_set():
+                            ipc.startup_gate.wait(timeout=0.02)
+                        if self._stop_ev.is_set():
+                            try:
+                                child_conn.close()
+                            except OSError:
+                                pass
+                            return
+
+                    if ipc.startup_fail is not None:
                         try:
-                            child_conn.close()
+                            child_conn.send(("startup_error", ipc.startup_fail))
                         except OSError:
                             pass
-                        self._alive = False
+                        finally:
+                            child_conn.close()
                         return
 
-                if ipc.startup_fail is not None:
                     try:
-                        child_conn.send(("startup_error", ipc.startup_fail))
+                        child_conn.send(("ready", f"path={self.model_path} device=cpu dtype=torch.float32 torch=fake"))
+                    except OSError:
+                        child_conn.close()
+                        return
+
+                    while not self._stop_ev.is_set():
+                        try:
+                            msg = child_conn.recv()
+                        except (EOFError, OSError, TimeoutError):
+                            break
+                        if msg is None:
+                            break
+                        with ipc._lock:
+                            ipc.ipc_messages.append(msg)
+                            call_idx = len(ipc.ipc_messages)
+                        if ipc.crash_on_call is not None and call_idx == ipc.crash_on_call:
+                            child_conn.close()
+                            return
+
+                        _, batch_items = msg
+                        with ipc._lock:
+                            ipc.batch_sizes.append(len(batch_items))
+                            ipc.ipc_by_path.append((self.model_path, list(batch_items)))
+
+                        ipc.active_infer_started.set()
+                        if ipc.allow_infer_finish is not None:
+                            ipc.allow_infer_finish.wait(timeout=5.0)
+                        if ipc.infer_delay > 0:
+                            time.sleep(ipc.infer_delay)
+
+                        out = []
+                        for text, labels, _task, _prompt in batch_items:
+                            if "__TOO_LONG__" in text:
+                                out.append(("input_too_long", "Prepared input length (8100 tokens) exceeds the 7,999-token limit."))
+                            elif "__ERR__" in text:
+                                out.append(("error", "Model returned invalid classification scores."))
+                            else:
+                                names = list(labels)
+                                p = 1.0 / len(names)
+                                out.append(("ok", (names[0], {n: p for n in names})))
+                        try:
+                            child_conn.send(("batch_ok", out))
+                        except (EOFError, OSError):
+                            break
+
+                    try:
+                        child_conn.close()
                     except OSError:
                         pass
-                    finally:
-                        child_conn.close()
-                    self._alive = False
-                    return
-
-                try:
-                    child_conn.send(("ready", "device=cpu dtype=torch.float32 torch=fake"))
-                except OSError:
-                    child_conn.close()
-                    self._alive = False
-                    return
-
-                while not self._stop_ev.is_set():
-                    try:
-                        msg = child_conn.recv()
-                    except (EOFError, OSError, TimeoutError):
-                        break
-                    if msg is None:
-                        break
-                    with ipc._lock:
-                        ipc.ipc_messages.append(msg)
-                        call_idx = len(ipc.ipc_messages)
-                    if ipc.crash_on_call is not None and call_idx == ipc.crash_on_call:
-                        child_conn.close()
-                        self._alive = False
-                        return
-
-                    _, batch_items = msg
-                    with ipc._lock:
-                        ipc.batch_sizes.append(len(batch_items))
-
-                    ipc.active_infer_started.set()
-                    if ipc.allow_infer_finish is not None:
-                        ipc.allow_infer_finish.wait(timeout=5.0)
-                    if ipc.infer_delay > 0:
-                        time.sleep(ipc.infer_delay)
-
-                    out = []
-                    for text, labels, _task, _prompt in batch_items:
-                        if "__TOO_LONG__" in text:
-                            out.append(("input_too_long", "Prepared input length (8100 tokens) exceeds the 7,999-token limit."))
-                        elif "__ERR__" in text:
-                            out.append(("error", "Model returned invalid classification scores."))
-                        else:
-                            names = list(labels)
-                            p = 1.0 / len(names)
-                            out.append(("ok", (names[0], {n: p for n in names})))
-                    try:
-                        child_conn.send(("batch_ok", out))
-                    except (EOFError, OSError):
-                        break
-
-                try:
-                    child_conn.close()
-                except OSError:
-                    pass
-                self._alive = False
+                finally:
+                    self._mark_dead()
 
             def start(self) -> None:
-                self._alive = True
+                with ipc._lock:
+                    self._alive = True
+                    self._counted_alive = True
+                    ipc.active_alive_count += 1
+                    ipc.max_concurrent_alive = max(ipc.max_concurrent_alive, ipc.active_alive_count)
                 self._thread.start()
 
             def is_alive(self) -> bool:
@@ -262,7 +280,7 @@ class _FakeWorkerIPC:
             def join(self, timeout=None) -> None:
                 self._thread.join(timeout=timeout)
                 if not self._thread.is_alive():
-                    self._alive = False
+                    self._mark_dead()
 
             def terminate(self) -> None:
                 with ipc._lock:
@@ -287,7 +305,7 @@ class _FakeWorkerIPC:
                     child_conn.close()
                 except OSError:
                     pass
-                self._alive = False
+                self._mark_dead()
 
             def close(self) -> None:
                 self.closed = True
@@ -939,6 +957,348 @@ class ModelWorkerMicroBatchTests(unittest.TestCase):
                 )
             finally:
                 ipc_fair.allow_infer_finish.set()
+                w2.close()
+
+    def test_single_resident_model_swapping_and_same_model_coalescing(self) -> None:
+        ipc = _FakeWorkerIPC()
+        with tempfile.TemporaryDirectory() as amber_dir, tempfile.TemporaryDirectory() as bge_dir:
+            paths = {
+                "amber-150m": amber_dir,
+                "bge-m3-zeroshot-v2.0": bge_dir,
+            }
+            w = ModelWorker(
+                paths,
+                device="cpu",
+                precision="fp32",
+                idle_timeout=0.15,
+                coalesce_ms=0.0,
+                max_batch_size=32,
+            )
+            w._ctx = ipc  # type: ignore[assignment]
+            try:
+                self.assertIsNone(w.loaded_model())
+
+                # 1. Default model loads amber-150m
+                choice_a, _ = w.classify("english text", ["a", "b"])
+                self.assertEqual(choice_a, "a")
+                self.assertEqual(w.loaded_model(), "amber-150m")
+                self.assertEqual(ipc.spawned_paths, [amber_dir])
+                self.assertEqual(ipc.max_concurrent_alive, 1)
+
+                # 2. Switching to bge-m3-zeroshot-v2.0 (via alias) shuts down amber subprocess FIRST
+                choice_b, _ = w.classify("한국어 텍스트", ["긍정", "부정"], model_id="MoritzLaurer/bge-m3-zeroshot-v2.0")
+                self.assertEqual(choice_b, "긍정")
+                self.assertEqual(w.loaded_model(), "bge-m3-zeroshot-v2.0")
+                self.assertEqual(ipc.spawned_paths, [amber_dir, bge_dir])
+                self.assertTrue(ipc.procs[0].closed)  # type: ignore[attr-defined]
+                self.assertFalse(ipc.procs[0].is_alive())  # type: ignore[attr-defined]
+                self.assertEqual(ipc.max_concurrent_alive, 1, "Two model subprocesses must NEVER be alive simultaneously")
+
+                # 3. Same-model follow-up reuses bge subprocess without respawning
+                w.classify("또 다른 한국어", ["긍정", "부정"], model_id="bge-m3-zeroshot-v2.0")
+                self.assertEqual(ipc.spawn_count, 2)
+
+                # 4. Mixed 5-tuple batch coalesces same-model items cleanly: [A1, B1, A2, B2] -> [A1, A2] then [B1, B2]
+                ipc.ipc_by_path.clear()
+                mixed_items = [
+                    ("A1", ["x", "y"], "decision", None, "amber-150m"),
+                    ("B1", ["x", "y"], "decision", None, "bge-m3-zeroshot-v2.0"),
+                    ("A2", ["x", "y"], "decision", None, "MLukauskas/amber-150m"),
+                    ("B2", ["x", "y"], "decision", None, "MoritzLaurer/bge-m3-zeroshot-v2.0"),
+                ]
+                mixed_res = w.classify_batch(mixed_items)
+                self.assertEqual(len(mixed_res), 4)
+                self.assertTrue(all(st == "ok" for st, _ in mixed_res))
+                # Batch 0: A1+A2 on amber_dir; Batch 1: B1+B2 on bge_dir -> only 2 IPC batches total!
+                self.assertEqual(
+                    [(p, [it[0] for it in items]) for p, items in ipc.ipc_by_path],
+                    [
+                        (amber_dir, ["A1", "A2"]),
+                        (bge_dir, ["B1", "B2"]),
+                    ],
+                )
+                self.assertEqual(w.loaded_model(), "bge-m3-zeroshot-v2.0")
+                self.assertEqual(ipc.max_concurrent_alive, 1)
+
+                # 5. start(model_id=...) switches cleanly back to amber-150m; unknown model rejected before queuing
+                w.start(model_id=MODEL_ID)
+                self.assertEqual(w.loaded_model(), MODEL_ID)
+                self.assertEqual(ipc.max_concurrent_alive, 1)
+
+                with self.assertRaises(ValueError):
+                    w.classify("nope", ["a", "b"], model_id="unknown-model")
+                self.assertEqual(w.loaded_model(), MODEL_ID)
+
+                # 6. Idle timeout evicts active model and clears loaded_model()
+                deadline = time.monotonic() + 2.0
+                while w.is_loaded() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(w.is_loaded())
+                self.assertIsNone(w.loaded_model())
+            finally:
+                w.close()
+
+    def test_same_model_coalescing_and_fifo_cross_model_ordering(self) -> None:
+        ipc = _FakeWorkerIPC()
+        ipc.allow_infer_finish = threading.Event()
+        with tempfile.TemporaryDirectory() as amber_dir, tempfile.TemporaryDirectory() as bge_dir:
+            w = ModelWorker(
+                {MODEL_ID: amber_dir, BGE_M3_MODEL_ID: bge_dir},
+                device="cpu",
+                precision="fp32",
+                idle_timeout=60.0,
+                coalesce_ms=0.0,
+                max_batch_size=32,
+            )
+            w._ctx = ipc  # type: ignore[assignment]
+            try:
+                # Hold one amber-150m call in-flight so mixed requests build up in the queue
+                blocker_res: list[object] = []
+                t_block = threading.Thread(target=lambda: blocker_res.append(w.classify("blocker", ["a", "b"])))
+                t_block.start()
+                self.assertTrue(ipc.active_infer_started.wait(timeout=3.0))
+
+                # Enqueue interleaved requests: amber-1, bge-1, amber-2, bge-2, amber-3
+                results: dict[str, object] = {}
+                errors: list[BaseException] = []
+                specs = [
+                    ("amber-1", MODEL_ID),
+                    ("bge-1", BGE_M3_MODEL_ID),
+                    ("amber-2", MODEL_ID),
+                    ("bge-2", BGE_M3_MODEL_ID),
+                    ("amber-3", MODEL_ID),
+                ]
+                threads: list[threading.Thread] = []
+                for idx, (label, mid) in enumerate(specs, start=1):
+                    def _run(k=label, m=mid) -> None:
+                        try:
+                            results[k] = w.classify(k, ["x", "y"], model_id=m)
+                        except BaseException as exc:
+                            errors.append(exc)
+
+                    t = threading.Thread(target=_run)
+                    t.start()
+                    threads.append(t)
+                    deadline = time.monotonic() + 2.0
+                    while len(w._queue) < idx and time.monotonic() < deadline:
+                        time.sleep(0.005)
+                self.assertEqual(len(w._queue), 5)
+
+                ipc.allow_infer_finish.set()
+                t_block.join(timeout=3.0)
+                for t in threads:
+                    t.join(timeout=3.0)
+
+                self.assertEqual(errors, [])
+                self.assertEqual(len(results), 5)
+                # Expect 3 IPC calls total: [blocker] (amber), [amber-1, amber-2, amber-3] (amber), [bge-1, bge-2] (bge)
+                self.assertEqual(
+                    [(path, [item[0] for item in items]) for path, items in ipc.ipc_by_path],
+                    [
+                        (amber_dir, ["blocker"]),
+                        (amber_dir, ["amber-1", "amber-2", "amber-3"]),
+                        (bge_dir, ["bge-1", "bge-2"]),
+                    ],
+                )
+                # Only 2 subprocess spawns total (zero thrashing!) and strictly single-resident
+                self.assertEqual(ipc.spawn_count, 2)
+                self.assertEqual(ipc.max_concurrent_alive, 1)
+            finally:
+                ipc.allow_infer_finish.set()
+                w.close()
+
+    def test_swap_cancellation_idle_eviction_and_model_path_resolution(self) -> None:
+        # 1. Cancelled cross-model request before swap skips swap completely
+        ipc = _FakeWorkerIPC()
+        ipc.allow_infer_finish = threading.Event()
+        with tempfile.TemporaryDirectory() as amber_dir, tempfile.TemporaryDirectory() as bge_dir:
+            w = ModelWorker(
+                {MODEL_ID: amber_dir, BGE_M3_MODEL_ID: bge_dir},
+                device="cpu",
+                precision="fp32",
+                idle_timeout=0.15,
+                coalesce_ms=0.0,
+                max_batch_size=1,
+            )
+            w._ctx = ipc  # type: ignore[assignment]
+            try:
+                t1 = threading.Thread(target=lambda: w.classify("amber-live", ["a", "b"], model_id=MODEL_ID))
+                t1.start()
+                self.assertTrue(ipc.active_infer_started.wait(timeout=3.0))
+
+                cancel_ev = threading.Event()
+                err_bge: list[BaseException] = []
+                t2 = threading.Thread(
+                    target=lambda: self._capture_err(
+                        err_bge,
+                        lambda: w.classify("bge-cancelled", ["a", "b"], model_id=BGE_M3_MODEL_ID, cancel_event=cancel_ev),
+                    )
+                )
+                t2.start()
+                deadline = time.monotonic() + 2.0
+                while len(w._queue) < 1 and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                cancel_ev.set()
+                ipc.allow_infer_finish.set()
+                t1.join(timeout=3.0)
+                t2.join(timeout=3.0)
+
+                self.assertEqual(len(err_bge), 1)
+                self.assertIsInstance(err_bge[0], WorkerCancelledError)
+                # Never spawned BGE-M3!
+                self.assertEqual(ipc.spawned_paths, [amber_dir])
+
+                # Wait for idle eviction of amber-150m
+                deadline = time.monotonic() + 2.0
+                while w.is_loaded() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(w.is_loaded())
+                self.assertIsNone(w.loaded_model())
+            finally:
+                ipc.allow_infer_finish.set()
+                w.close()
+
+        # 2. Request cancelled DURING model swap skips GPU IPC and still evicts on idle timeout
+        gate = threading.Event()
+        ipc_swap = _FakeWorkerIPC(startup_gate=gate)
+        with tempfile.TemporaryDirectory() as amber_dir, tempfile.TemporaryDirectory() as bge_dir:
+            w2 = ModelWorker(
+                {MODEL_ID: amber_dir, BGE_M3_MODEL_ID: bge_dir},
+                device="cpu",
+                precision="fp32",
+                idle_timeout=0.15,
+                coalesce_ms=0.0,
+            )
+            w2._ctx = ipc_swap  # type: ignore[assignment]
+            try:
+                gate.set()
+                w2.classify("warm-amber", ["a", "b"], model_id=MODEL_ID)
+                self.assertEqual(w2.loaded_model(), MODEL_ID)
+
+                gate.clear()
+                ipc_swap.startup_entered.clear()
+                cancel_ev2 = threading.Event()
+                err_swap: list[BaseException] = []
+                t_swap = threading.Thread(
+                    target=lambda: self._capture_err(
+                        err_swap,
+                        lambda: w2.classify("cancel-mid-swap", ["a", "b"], model_id=BGE_M3_MODEL_ID, cancel_event=cancel_ev2),
+                    )
+                )
+                t_swap.start()
+                self.assertTrue(ipc_swap.startup_entered.wait(timeout=3.0))
+                cancel_ev2.set()
+                t_swap.join(timeout=2.0)
+                self.assertEqual(len(err_swap), 1)
+                self.assertIsInstance(err_swap[0], WorkerCancelledError)
+
+                gate.set()
+                deadline = time.monotonic() + 2.0
+                while w2.loaded_model() != BGE_M3_MODEL_ID and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                # Cancelled BGE-M3 request did NOT execute inference on GPU
+                bge_ipc = [items for path, items in ipc_swap.ipc_by_path if path == bge_dir]
+                self.assertEqual(bge_ipc, [])
+
+                # Idle timer MUST still evict BGE-M3 after 0.15s
+                deadline = time.monotonic() + 2.0
+                while w2.is_loaded() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(w2.is_loaded())
+                self.assertIsNone(w2.loaded_model())
+            finally:
+                gate.set()
+                w2.close()
+
+        # 3. resolve_model_paths() & should_validate_all_model_paths()
+        self.assertEqual(
+            resolve_model_paths({}),
+            {MODEL_ID: "/opt/models/amber-150m", BGE_M3_MODEL_ID: "/opt/models/bge-m3-zeroshot-v2.0"},
+        )
+        self.assertTrue(should_validate_all_model_paths({}))
+        self.assertEqual(
+            resolve_model_paths({"MODELS_DIR": "/srv/models"}),
+            {MODEL_ID: "/srv/models/amber-150m", BGE_M3_MODEL_ID: "/srv/models/bge-m3-zeroshot-v2.0"},
+        )
+        self.assertTrue(should_validate_all_model_paths({"MODELS_DIR": "/srv/models"}))
+        self.assertEqual(
+            resolve_model_paths({"MODEL_PATH": "/custom/amber"}),
+            {MODEL_ID: "/custom/amber", BGE_M3_MODEL_ID: "/opt/models/bge-m3-zeroshot-v2.0"},
+        )
+        self.assertFalse(should_validate_all_model_paths({"MODEL_PATH": "/custom/amber"}))
+
+    def test_review_regressions_nli_ipc_pair_budget_preswap_error_and_cancelled_last_used(self) -> None:
+        # 1. NLI IPC chunks are bounded by total (items * labels) pairs (default 16) to avoid long GPU stalls
+        ipc = _FakeWorkerIPC()
+        with tempfile.TemporaryDirectory() as amber_dir, tempfile.TemporaryDirectory() as bge_dir:
+            w = ModelWorker(
+                {MODEL_ID: amber_dir, BGE_M3_MODEL_ID: bge_dir},
+                device="cpu",
+                precision="fp32",
+                idle_timeout=60.0,
+                coalesce_ms=0.0,
+                max_batch_size=32,
+                max_nli_pairs_per_ipc=16,
+            )
+            w._ctx = ipc  # type: ignore[assignment]
+            try:
+                labels8 = [f"lbl{i}" for i in range(8)]
+                bge_items = [(f"kor-{i}", labels8, "decision", None) for i in range(5)]
+                res_bge = w.classify_batch(bge_items, model_id=BGE_M3_MODEL_ID)
+                self.assertEqual(len(res_bge), 5)
+                # 5 items * 8 labels = 40 pairs -> split into [2, 2, 1] items (= 16, 16, 8 pairs per IPC chunk)
+                self.assertEqual(ipc.batch_sizes, [2, 2, 1])
+
+                # Amber still coalesces all 5 items into 1 IPC chunk
+                ipc.batch_sizes.clear()
+                amber_items = [(f"eng-{i}", labels8, "decision", None) for i in range(5)]
+                res_amber = w.classify_batch(amber_items, model_id=MODEL_ID)
+                self.assertEqual(len(res_amber), 5)
+                self.assertEqual(ipc.batch_sizes, [5])
+            finally:
+                w.close()
+
+        # 2. Pre-swap missing directory error preserves healthy resident worker instead of evicting it
+        ipc2 = _FakeWorkerIPC()
+        with tempfile.TemporaryDirectory() as amber_dir:
+            missing_bge = amber_dir + "_does_not_exist"
+            w2 = ModelWorker(
+                amber_dir,
+                model_paths={MODEL_ID: amber_dir, BGE_M3_MODEL_ID: missing_bge},
+                device="cpu",
+                precision="fp32",
+                idle_timeout=60.0,
+                coalesce_ms=0.0,
+            )
+            w2._ctx = ipc2  # type: ignore[assignment]
+            try:
+                w2.classify("healthy amber", ["a", "b"], model_id=MODEL_ID)
+                self.assertEqual(w2.loaded_model(), MODEL_ID)
+                self.assertEqual(ipc2.spawn_count, 1)
+
+                with self.assertRaises(RuntimeError) as cm:
+                    w2.classify("missing bge", ["a", "b"], model_id=BGE_M3_MODEL_ID)
+                self.assertIn("does not exist", str(cm.exception))
+                # Healthy amber subprocess stayed alive and loaded!
+                self.assertTrue(w2.is_loaded())
+                self.assertEqual(w2.loaded_model(), MODEL_ID)
+                self.assertEqual(ipc2.spawn_count, 1)
+
+                # 3. A batch already cancelled before _ensure_worker_locked must NOT extend _last_used
+                from app.worker import _BatchFuture
+
+                past_ts = time.monotonic() - 100.0
+                w2._last_used = past_ts
+                w2.idle_timeout = 10.0
+                cancelled_fut = _BatchFuture(1)
+                cancelled_fut.cancel()
+                with w2._queue_cond:
+                    w2._in_flight += 1
+                w2._execute_batch(MODEL_ID, [(("dead", ["a", "b"], "decision", None), cancelled_fut, 0)])
+                # Because idle_for (100s) > idle_timeout (10s) and zero GPU work ran, worker evicts immediately
+                self.assertEqual(w2._last_used, past_ts)
+                self.assertFalse(w2.is_loaded())
+            finally:
                 w2.close()
 
 

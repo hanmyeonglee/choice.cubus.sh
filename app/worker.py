@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import logging
 import math
 import multiprocessing as mp
@@ -14,10 +14,15 @@ from threading import Condition, Event, Lock, Thread, Timer, current_thread, mai
 import time
 from typing import Any
 
+from .runtime import BGE_M3_MODEL_ID, DEFAULT_MODEL_ID, resolve_model_id
+
 _PRECISIONS = {"fp16", "float16", "fp32", "float32"}
 _VALID_PLANES = frozenset({"interactive", "admin"})
 _STARTUP_POLL_INTERVAL = 0.2
 _CANCEL_WAIT_POLL_INTERVAL = 0.02
+_DEFAULT_MAX_NLI_PAIRS_PER_IPC = 16
+_NLI_LONG_TEXT_CHARS_CAP = 2000
+_NLI_MAX_BATCH_CHARS_CAP = 8000
 
 
 def threading_current_is_main() -> bool:
@@ -32,13 +37,23 @@ class WorkerCancelledError(RuntimeError):
     """Raised when a classification request is cancelled or times out before completion."""
 
 
+class _PreSwapValidationError(RuntimeError):
+    """Raised before stopping an active worker when target model validation fails."""
+
+
 def validate_runtime_config(
-    model_path: str,
+    model_path: str | Mapping[str, str],
     device: str,
     precision: str | None = None,
     idle_timeout: float = 180.0,
 ) -> None:
-    if not Path(model_path).is_dir():
+    if isinstance(model_path, Mapping):
+        if not model_path:
+            raise RuntimeError("At least one model path must be configured.")
+        for model_id, path in model_path.items():
+            if not Path(path).is_dir():
+                raise RuntimeError(f"Model directory for {model_id!r} does not exist: {path}")
+    elif not Path(model_path).is_dir():
         raise RuntimeError(f"Model directory does not exist: {model_path}")
     if precision is not None and precision.strip():
         key = precision.strip().lower()
@@ -171,24 +186,29 @@ class _BatchFuture:
 
 
 class ModelWorker:
-    """Coalesce inference through one dynamic micro-batching subprocess and evict after idle timeout."""
+    """Coalesce inference through one single-resident micro-batching subprocess with safe model swapping."""
 
     def __init__(
         self,
-        model_path: str,
+        model_path: str | Mapping[str, str],
         device: str = "cuda",
         precision: str | None = None,
         idle_timeout: float = 180.0,
         *,
+        model_paths: Mapping[str, str] | None = None,
+        default_model_id: str = DEFAULT_MODEL_ID,
         coalesce_ms: float = 5.0,
         max_batch_size: int = 32,
         max_admin_batch_size: int = 16,
         long_text_chars: int = 4000,
         max_long_items_per_batch: int = 1,
         max_batch_chars: int = 32000,
+        max_nli_pairs_per_ipc: int = _DEFAULT_MAX_NLI_PAIRS_PER_IPC,
         startup_timeout: float = 60.0,
     ) -> None:
         validate_runtime_config(model_path, device, precision, idle_timeout)
+        if not isinstance(default_model_id, str) or not default_model_id.strip():
+            raise ValueError("default_model_id must be a non-blank string.")
         if not math.isfinite(coalesce_ms) or coalesce_ms < 0:
             raise ValueError("coalesce_ms must be 0 or greater.")
         if isinstance(max_batch_size, bool) or not isinstance(max_batch_size, int) or max_batch_size < 1:
@@ -209,10 +229,33 @@ class ModelWorker:
             raise ValueError("max_long_items_per_batch must be an integer >= 1.")
         if isinstance(max_batch_chars, bool) or not isinstance(max_batch_chars, int) or max_batch_chars < 1:
             raise ValueError("max_batch_chars must be an integer >= 1.")
+        if (
+            isinstance(max_nli_pairs_per_ipc, bool)
+            or not isinstance(max_nli_pairs_per_ipc, int)
+            or max_nli_pairs_per_ipc < 1
+        ):
+            raise ValueError("max_nli_pairs_per_ipc must be an integer >= 1.")
         if not math.isfinite(startup_timeout) or startup_timeout <= 0:
             raise ValueError("startup_timeout must be greater than 0.")
 
-        self.model_path = model_path
+        resolved_paths: dict[str, str] = {}
+        if isinstance(model_path, Mapping):
+            for mid, mpath in model_path.items():
+                resolved_paths[str(mid)] = str(mpath)
+            if model_paths is not None:
+                for mid, mpath in model_paths.items():
+                    resolved_paths[str(mid)] = str(mpath)
+            if default_model_id not in resolved_paths:
+                raise ValueError(f"default_model_id {default_model_id!r} missing from model_path mapping.")
+        else:
+            if model_paths is not None:
+                for mid, mpath in model_paths.items():
+                    resolved_paths[str(mid)] = str(mpath)
+            resolved_paths[default_model_id] = str(model_path)
+
+        self.default_model_id = default_model_id
+        self.model_paths = resolved_paths
+        self.model_path = resolved_paths[default_model_id]
         self.device = device
         self.precision = precision
         self.idle_timeout = float(idle_timeout)
@@ -222,6 +265,7 @@ class ModelWorker:
         self.long_text_chars = long_text_chars
         self.max_long_items_per_batch = max_long_items_per_batch
         self.max_batch_chars = max_batch_chars
+        self.max_nli_pairs_per_ipc = max_nli_pairs_per_ipc
         self.startup_timeout = float(startup_timeout)
 
         self._ctx = mp.get_context("spawn")
@@ -232,17 +276,40 @@ class ModelWorker:
 
         self._proc: mp.Process | None = None
         self._conn: Connection | None = None
+        self._loaded_model_id: str | None = None
         self._starting_proc: mp.Process | None = None
         self._timer: Timer | None = None
         self._timer_gen = 0
         self._last_used = 0.0
 
-        self._queue: deque[tuple[tuple[Any, ...], _BatchFuture, int]] = deque()
-        self._admin_queue: deque[tuple[tuple[Any, ...], _BatchFuture, int]] = deque()
+        self._queue: deque[tuple[Any, ...]] = deque()
+        self._admin_queue: deque[tuple[Any, ...]] = deque()
         self._last_plane = "admin"
         self._in_flight = 0
         self._closed = False
         self._dispatcher: Thread | None = None
+
+    def _normalize_model_id(self, model_id: str | None) -> str:
+        if model_id is None:
+            return self.default_model_id
+        if not isinstance(model_id, str):
+            raise ValueError("model_id must be a string.")
+        if model_id in self.model_paths:
+            return model_id
+        canonical = resolve_model_id(model_id)
+        if canonical is not None and canonical in self.model_paths:
+            return canonical
+        raise ValueError(f"Unknown model {model_id!r}.")
+
+    def _unpack_queue_entry(
+        self,
+        entry: tuple[Any, ...],
+    ) -> tuple[tuple[Any, ...], _BatchFuture | None, int, str]:
+        if len(entry) == 4:
+            item, fut, idx, entry_model_id = entry
+            return item, fut, idx, entry_model_id
+        item, fut, idx = entry
+        return item, fut, idx, self.default_model_id
 
     def is_loaded(self) -> bool:
         with self._proc_state_lock:
@@ -254,22 +321,35 @@ class ModelWorker:
             except (ValueError, AttributeError):
                 return False
 
-    def start(self) -> None:
+    def loaded_model(self) -> str | None:
+        with self._proc_state_lock:
+            proc = self._proc
+            model_id = self._loaded_model_id
+            if proc is None:
+                return None
+            try:
+                return model_id if proc.is_alive() else None
+            except (ValueError, AttributeError):
+                return None
+
+    def start(self, model_id: str | None = None) -> None:
+        target_model_id = self._normalize_model_id(model_id)
         with self._lock:
             with self._queue_cond:
                 if self._closed:
                     raise RuntimeError("Model worker is closed.")
                 busy = self._has_pending_work_locked()
             self._cancel_timer_locked()
-            self._ensure_worker_locked()
+            self._ensure_worker_locked(target_model_id)
             self._last_used = time.monotonic()
             if not busy:
                 self._schedule_timer_locked()
 
     def classify_batch(
         self,
-        items: Sequence[tuple[str, list[str] | dict[str, str | None], str, str | None]],
+        items: Sequence[tuple[Any, ...]],
         *,
+        model_id: str | None = None,
         cancel_event: Event | None = None,
         timeout: float | None = None,
         plane: str = "interactive",
@@ -280,12 +360,20 @@ class ModelWorker:
         if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
             raise ValueError("timeout must be 0 or greater.")
 
-        normalized: list[tuple[Any, ...]] = []
+        default_target = self._normalize_model_id(model_id)
+        normalized: list[tuple[tuple[Any, ...], str]] = []
         for raw_item in items:
             item = tuple(raw_item)
-            if len(item) != 4:
-                raise ValueError("Each classification item must be a 4-tuple of (text, labels, task, prompt).")
-            normalized.append(item)
+            if len(item) == 4:
+                normalized.append((item, default_target))
+            elif len(item) == 5:
+                item_model_id = self._normalize_model_id(item[4])
+                normalized.append((item[:4], item_model_id))
+            else:
+                raise ValueError(
+                    "Each classification item must be a 4-tuple of (text, labels, task, prompt) "
+                    "or a 5-tuple of (text, labels, task, prompt, model_id)."
+                )
 
         if cancel_event is not None and cancel_event.is_set():
             raise WorkerCancelledError("Classification request was cancelled.")
@@ -302,8 +390,8 @@ class ModelWorker:
             future = _BatchFuture(len(normalized), cancel_event=cancel_event, deadline=deadline)
             self._ensure_dispatcher_locked()
             target_queue = self._admin_queue if plane == "admin" else self._queue
-            for idx, item in enumerate(normalized):
-                target_queue.append((item, future, idx))
+            for idx, (item_4tuple, item_model_id) in enumerate(normalized):
+                target_queue.append((item_4tuple, future, idx, item_model_id))
             self._queue_cond.notify_all()
 
         self._wait_for_future(future, cancel_event=cancel_event, deadline=deadline)
@@ -353,12 +441,14 @@ class ModelWorker:
         task: str = "decision",
         prompt: str | None = None,
         *,
+        model_id: str | None = None,
         cancel_event: Event | None = None,
         timeout: float | None = None,
         plane: str = "interactive",
     ) -> tuple[str, dict[str, float]]:
         status, payload = self.classify_batch(
             [(text, labels, task, prompt)],
+            model_id=model_id,
             cancel_event=cancel_event,
             timeout=timeout,
             plane=plane,
@@ -412,7 +502,7 @@ class ModelWorker:
             seen_ids: set[int] = set()
             for q in (self._queue, self._admin_queue):
                 while q:
-                    _, fut, _ = q.popleft()
+                    _, fut, _, _ = self._unpack_queue_entry(q.popleft())
                     if fut is not None and id(fut) not in seen_ids:
                         seen_ids.add(id(fut))
                         pending_futures.append(fut)
@@ -488,18 +578,18 @@ class ModelWorker:
         dispatcher.start()
 
     @staticmethod
-    def _prune_cancelled_head_locked(q: deque[tuple[tuple[Any, ...], _BatchFuture, int]]) -> None:
+    def _prune_cancelled_head_locked(q: deque[tuple[Any, ...]]) -> None:
         while q and (q[0][1] is None or q[0][1].is_done_or_cancelled()):
             q.popleft()
 
-    def _pop_batch_locked(self) -> list[tuple[tuple[Any, ...], _BatchFuture, int]]:
+    def _pop_batch_locked(self) -> tuple[str | None, list[tuple[tuple[Any, ...], _BatchFuture, int]]]:
         self._prune_cancelled_head_locked(self._queue)
         self._prune_cancelled_head_locked(self._admin_queue)
 
         has_interactive = bool(self._queue)
         has_admin = bool(self._admin_queue)
         if not has_interactive and not has_admin:
-            return []
+            return None, []
 
         if has_interactive and has_admin:
             chosen_plane = "interactive" if self._last_plane == "admin" else "admin"
@@ -517,32 +607,67 @@ class ModelWorker:
             limit = self.max_batch_size
 
         batch: list[tuple[tuple[Any, ...], _BatchFuture, int]] = []
+        kept: list[tuple[Any, ...]] = []
+        target_model_id: str | None = None
+        is_nli_target = False
+        effective_long_chars = self.long_text_chars
+        effective_max_chars = self.max_batch_chars
         long_count = 0
         total_chars = 0
+        total_pairs = 0
+
         while q and len(batch) < limit:
-            entry = q[0]
-            fut = entry[1]
+            entry = q.popleft()
+            item, fut, idx, entry_model_id = self._unpack_queue_entry(entry)
             if fut is None or fut.is_done_or_cancelled():
-                q.popleft()
                 continue
-            text = entry[0][0]
+            if target_model_id is None:
+                target_model_id = entry_model_id
+                is_nli_target = target_model_id == BGE_M3_MODEL_ID
+                if is_nli_target:
+                    effective_long_chars = min(self.long_text_chars, _NLI_LONG_TEXT_CHARS_CAP)
+                    effective_max_chars = min(self.max_batch_chars, _NLI_MAX_BATCH_CHARS_CAP)
+            elif entry_model_id != target_model_id:
+                kept.append(entry)
+                continue
+
+            text = item[0]
             text_len = len(text) if isinstance(text, str) else 0
-            is_long = text_len > self.long_text_chars
+            is_long = text_len > effective_long_chars
+            pair_count = 1
+            if is_nli_target and len(item) >= 2:
+                raw_labels = item[1]
+                if isinstance(raw_labels, (Mapping, Sequence)) and not isinstance(raw_labels, (str, bytes, bytearray)):
+                    pair_count = max(1, len(raw_labels))
+
             if batch:
                 if is_long and (
                     long_count >= self.max_long_items_per_batch or self.max_long_items_per_batch == 1
                 ):
+                    kept.append(entry)
                     break
-                if total_chars + text_len > self.max_batch_chars:
+                if total_chars + text_len > effective_max_chars:
+                    kept.append(entry)
                     break
-            q.popleft()
-            batch.append(entry)
+                if is_nli_target and total_pairs + pair_count > self.max_nli_pairs_per_ipc:
+                    kept.append(entry)
+                    break
+
+            batch.append((item, fut, idx))
             total_chars += text_len
+            total_pairs += pair_count
             if is_long:
                 long_count += 1
                 if long_count >= self.max_long_items_per_batch:
                     break
-        return batch
+            if is_nli_target and total_pairs >= self.max_nli_pairs_per_ipc:
+                break
+
+        if kept:
+            for entry in reversed(kept):
+                q.appendleft(entry)
+
+        return target_model_id, batch
 
     def _reschedule_idle_if_needed(self) -> None:
         with self._lock:
@@ -560,6 +685,7 @@ class ModelWorker:
 
     def _dispatcher_loop(self) -> None:
         while True:
+            target_model_id: str | None = None
             batch: list[tuple[tuple[Any, ...], _BatchFuture, int]] = []
             need_idle_check = False
             with self._queue_cond:
@@ -583,13 +709,13 @@ class ModelWorker:
                 if self._closed:
                     for q in (self._queue, self._admin_queue):
                         while q:
-                            _, fut, _ = q.popleft()
+                            _, fut, _, _ = self._unpack_queue_entry(q.popleft())
                             if fut is not None:
                                 fut.set_fatal_error(RuntimeError("Model worker is closed."))
                     return
 
-                batch = self._pop_batch_locked()
-                if not batch:
+                target_model_id, batch = self._pop_batch_locked()
+                if not batch or target_model_id is None:
                     need_idle_check = True
                 else:
                     self._in_flight += len(batch)
@@ -598,7 +724,8 @@ class ModelWorker:
                 self._reschedule_idle_if_needed()
                 continue
 
-            self._execute_batch(batch)
+            assert target_model_id is not None
+            self._execute_batch(target_model_id, batch)
 
     def _fail_batch_futures(self, batch: list[tuple[tuple[Any, ...], _BatchFuture, int]], message: str) -> None:
         seen_ids: set[int] = set()
@@ -607,10 +734,15 @@ class ModelWorker:
                 seen_ids.add(id(fut))
                 fut.set_fatal_error(RuntimeError(message))
 
-    def _execute_batch(self, batch: list[tuple[tuple[Any, ...], _BatchFuture, int]]) -> None:
+    def _execute_batch(
+        self,
+        model_id: str,
+        batch: list[tuple[tuple[Any, ...], _BatchFuture, int]],
+    ) -> None:
         active_batch = batch
         batch_results: list[tuple[str, Any]] | None = None
         failure_message: str | None = None
+        ran_gpu_or_start = False
 
         with self._lock:
             try:
@@ -622,8 +754,9 @@ class ModelWorker:
                 else:
                     active_batch = [entry for entry in batch if not entry[1].is_done_or_cancelled()]
                     if active_batch:
-                        self._ensure_worker_locked()
-                        # Re-filter in case callers cancelled while cold startup was in progress.
+                        self._ensure_worker_locked(model_id)
+                        ran_gpu_or_start = True
+                        # Re-filter in case callers cancelled while cold startup / model swap was in progress.
                         active_batch = [entry for entry in active_batch if not entry[1].is_done_or_cancelled()]
                     if active_batch:
                         batch_items = [item for item, _, _ in active_batch]
@@ -648,6 +781,8 @@ class ModelWorker:
                                 self._stop_worker_locked("unexpected worker IPC response")
                                 failure_message = "Model worker returned an unexpected IPC response."
                         self._last_used = time.monotonic()
+            except _PreSwapValidationError as exc:
+                failure_message = str(exc) or f"{type(exc).__name__}"
             except Exception as exc:
                 if self._proc is not None or self._conn is not None:
                     self._stop_worker_locked("worker IPC error")
@@ -657,8 +792,16 @@ class ModelWorker:
                     self._in_flight -= len(batch)
                     still_busy = self._has_pending_work_locked() or self._closed
                 if not still_busy and self._proc is not None:
-                    self._last_used = time.monotonic()
-                    self._schedule_timer_locked()
+                    if ran_gpu_or_start:
+                        self._last_used = time.monotonic()
+                        self._schedule_timer_locked()
+                    elif self.idle_timeout > 0:
+                        idle_for = time.monotonic() - self._last_used
+                        remaining = self.idle_timeout - idle_for
+                        if remaining <= 0.05:
+                            self._stop_worker_locked(f"idle for {idle_for:.0f}s")
+                        else:
+                            self._schedule_timer_locked(remaining)
 
         if failure_message is not None:
             self._fail_batch_futures(active_batch, failure_message)
@@ -670,11 +813,26 @@ class ModelWorker:
         for (_, fut, idx), entry_result in zip(active_batch, batch_results, strict=True):
             fut.set_item_result(idx, entry_result)
 
-    def _ensure_worker_locked(self) -> None:
-        if self._proc is not None and self._proc.is_alive() and self._conn is not None:
+    def _ensure_worker_locked(self, target_model_id: str | None = None) -> None:
+        model_id = self._normalize_model_id(target_model_id)
+        if (
+            self._proc is not None
+            and self._proc.is_alive()
+            and self._conn is not None
+            and self._loaded_model_id == model_id
+        ):
             return
+        target_path = self.model_paths[model_id]
+        if not Path(target_path).is_dir():
+            raise _PreSwapValidationError(f"Model directory for {model_id!r} does not exist: {target_path}")
+
         if self._proc is not None or self._conn is not None:
-            self._stop_worker_locked("stale worker cleanup")
+            if self._loaded_model_id is not None and self._loaded_model_id != model_id:
+                reason = f"switching model {self._loaded_model_id} -> {model_id}"
+            else:
+                reason = "stale worker cleanup"
+            # Fully terminate and reap the old subprocess before spawning so 100% of VRAM is freed first.
+            self._stop_worker_locked(reason)
 
         with self._queue_cond:
             if self._closed:
@@ -683,7 +841,7 @@ class ModelWorker:
         parent_conn, child_conn = self._ctx.Pipe()
         proc = self._ctx.Process(
             target=_worker_main,
-            args=(child_conn, self.model_path, self.device, self.precision),
+            args=(child_conn, target_path, self.device, self.precision),
             daemon=True,
         )
         try:
@@ -753,6 +911,7 @@ class ModelWorker:
                     raise RuntimeError("Model worker is closed.")
                 with self._proc_state_lock:
                     self._proc = proc
+                    self._loaded_model_id = model_id
                     self._starting_proc = None
             self._conn = parent_conn
         except BaseException:
@@ -767,7 +926,7 @@ class ModelWorker:
             raise
 
         self._last_used = time.monotonic()
-        logging.info("Model worker started: pid=%s %s", proc.pid, detail)
+        logging.info("Model worker started: model=%s pid=%s %s", model_id, proc.pid, detail)
 
     def _cancel_timer_locked(self) -> None:
         self._timer_gen += 1
@@ -811,7 +970,9 @@ class ModelWorker:
         conn = self._conn
         with self._proc_state_lock:
             proc = self._proc
+            prev_model = self._loaded_model_id
             self._proc = None
+            self._loaded_model_id = None
         self._conn = None
 
         if conn is not None:
@@ -832,4 +993,9 @@ class ModelWorker:
                 proc.join()
             with self._proc_state_lock:
                 proc.close()
-            logging.info("Model worker stopped (%s): pid=%s GPU context released", reason, pid)
+            logging.info(
+                "Model worker stopped (%s): model=%s pid=%s GPU context released",
+                reason,
+                prev_model or "unknown",
+                pid,
+            )

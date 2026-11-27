@@ -1,4 +1,4 @@
-"""Request and response schemas for the Amber 150M classification API."""
+"""Request and response schemas for the Choice multi-model classification API."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
-from .runtime import MODEL_ID
+from .runtime import BGE_M3_MODEL_ID, MODEL_ID
 
 MAX_BATCH_INPUTS = 64
 MAX_TEXT_CHARS_CAP = 16000
@@ -71,18 +71,19 @@ class ClassifyRequest(BaseModel):
     model: str = Field(
         default=MODEL_ID,
         description=(
-            'Model identifier. Defaults to "amber-150m" (also accepts "MLukauskas/amber-150m"). '
-            "Unknown model names are rejected with HTTP 400."
+            'Model identifier. Defaults to "amber-150m" (also accepts "MLukauskas/amber-150m") '
+            'or "bge-m3-zeroshot-v2.0" (also accepts "MoritzLaurer/bge-m3-zeroshot-v2.0") '
+            "for multilingual/Korean zero-shot NLI classification. Unknown model names are rejected with HTTP 400."
         ),
-        examples=[MODEL_ID, "MLukauskas/amber-150m"],
+        examples=[MODEL_ID, "MLukauskas/amber-150m", BGE_M3_MODEL_ID, "MoritzLaurer/bge-m3-zeroshot-v2.0"],
     )
     input: ClassifyInput = Field(
         description=(
             "Input text or batch of inputs to classify. Accepts a single string, a single "
             '{"text": str | dict | list} object, or a non-empty list of 1–64 strings and/or '
             '{"text": ...} objects. Each serialized item must not exceed 16,000 characters '
-            "(subject to the active runtime max_text_chars setting), and each complete prepared "
-            "sequence (input + task + prompt + labels) must not exceed 7,999 subword tokens."
+            "(subject to the active runtime max_text_chars setting). Token limits are enforced "
+            "without silent truncation (7,999 tokens for amber-150m; 8,192 tokens per pair for bge-m3-zeroshot-v2.0)."
         ),
         examples=[
             "I was charged twice for the same order.",

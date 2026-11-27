@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Classify single or batched text inputs against candidate labels with Choice API backed by Amber 150M. Explore request examples and API documentation.">
-  <title>Choice — Amber 150M Classification API</title>
+  <meta name="description" content="Classify single or batched text inputs against candidate labels with Choice API backed by Amber 150M and BGE-M3 Zero-Shot v2.0. Explore request examples and API documentation.">
+  <title>Choice — Multi-Model Classification API</title>
   <style>
     :root { color-scheme: dark; --bg: #111512; --panel: #191e1a; --line: #333c35; --text: #edf1e9; --muted: #a4afa6; --accent: #c7ef92; }
     * { box-sizing: border-box; }
@@ -68,7 +68,7 @@
       <div class="hero">
         <div class="eyebrow">TEXT IN. DECISION OUT.</div>
         <h1>Send context.<br>Get decisions.</h1>
-        <p class="intro">Classify single or batched inputs against competing candidate labels with Amber 150M via a standard Jina AI / OpenAI-style <code>/v1</code> API.</p>
+        <p class="intro">Classify single or batched inputs against competing candidate labels with <strong>Amber 150M</strong> (fast English-primary) or <strong>BGE-M3 Zero-Shot v2.0</strong> (multilingual / Korean, up to 8,192 tokens) via a standard Jina AI / OpenAI-style <code>/v1</code> API.</p>
         <div class="actions"><a class="button" href="/docs">Open API docs →</a><a class="secondary" href="#quickstart">View request example</a></div>
         <div class="endpoint"><span class="method">POST</span><code>/v1/classify</code><span class="auth">Bearer or X-API-Key authentication</span></div>
       </div>
@@ -113,10 +113,21 @@
   }
 }</code></pre>
         <ul class="guidelines">
+          <li>Choose <code>"model": "amber-150m"</code> (default, English-primary, up to 7,999 prepared tokens) for low-latency routing, or <code>"model": "bge-m3-zeroshot-v2.0"</code> for multilingual / Korean zero-shot NLI classification (up to 8,192 tokens per text/hypothesis pair).</li>
           <li>Pass bare label lists (e.g. <code>["negative", "neutral", "positive"]</code>) when label names are self-explanatory.</li>
           <li>Add concise label descriptions and an optional <code>prompt</code> when domain boundaries need disambiguation.</li>
-          <li>Keep each prepared sequence within 7,999 subword tokens and total request bodies within 256 KiB; oversized inputs return an OpenAI-style error envelope instead of truncating silently.</li>
+          <li>Oversized inputs return an OpenAI-style error envelope instead of truncating silently; total request bodies are capped at 256 KiB.</li>
         </ul>
+      </section>
+      <section aria-labelledby="models">
+        <h2 id="models">Available models</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Model ID</th><th>Alias</th><th>Best for</th><th>Token limit</th></tr></thead>
+          <tbody>
+            <tr><td><code>amber-150m</code></td><td><code>MLukauskas/amber-150m</code></td><td>Fast English-primary decision routing (default)</td><td>7,999 prepared tokens</td></tr>
+            <tr><td><code>bge-m3-zeroshot-v2.0</code></td><td><code>MoritzLaurer/bge-m3-zeroshot-v2.0</code></td><td>Multilingual &amp; Korean zero-shot NLI</td><td>8,192 tokens / pair</td></tr>
+          </tbody>
+        </table></div>
       </section>
       <section aria-labelledby="endpoints">
         <h2 id="endpoints">API endpoints</h2>
@@ -125,13 +136,13 @@
           <tbody>
             <tr><td>POST</td><td><code>/v1/classify</code></td><td>Single or batch classification (1–64 inputs)</td><td>Bearer / <code>X-API-Key</code></td></tr>
             <tr><td>GET</td><td><code>/v1/models</code></td><td>List available models</td><td>Bearer / <code>X-API-Key</code></td></tr>
-            <tr><td>GET</td><td><code>/healthz</code></td><td>Readiness</td><td>None</td></tr>
+            <tr><td>GET</td><td><code>/healthz</code></td><td>Readiness &amp; active model</td><td>None</td></tr>
           </tbody>
         </table></div>
-        <p class="note">Each serialized input defaults to an 8,000-character limit (configurable up to 16,000) and 7,999 prepared subword tokens. Scores are not calibrated probabilities of correctness.</p>
+        <p class="note">Each serialized input defaults to an 8,000-character limit (configurable up to 16,000). Token limits are enforced strictly without silent truncation. Scores are not calibrated probabilities of correctness.</p>
       </section>
     </main>
-    <footer><span>Choice · Amber 150M classification API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>
+    <footer><span>Choice · Amber 150M &amp; BGE-M3 Zero-Shot v2.0 classification API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>
   </div>
 </body>
 </html>

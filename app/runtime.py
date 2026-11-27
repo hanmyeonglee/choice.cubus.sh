@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import math
+import os
+from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 
@@ -12,8 +14,74 @@ from typing import Any, Protocol
 APP_VERSION = "0.3.0"
 MODEL_ID = "amber-150m"
 MODEL_OWNED_BY = "MLukauskas"
-SUPPORTED_MODELS = frozenset({MODEL_ID, f"{MODEL_OWNED_BY}/{MODEL_ID}"})
+BGE_M3_MODEL_ID = "bge-m3-zeroshot-v2.0"
+BGE_M3_OWNED_BY = "MoritzLaurer"
+DEFAULT_MODEL_ID = MODEL_ID
+DEFAULT_MODELS_DIR = "/opt/models"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSpec:
+    """Metadata and alias mapping for a supported classification model."""
+
+    id: str
+    owned_by: str
+    aliases: frozenset[str]
+    subdir: str
+
+
+MODEL_SPECS: tuple[ModelSpec, ...] = (
+    ModelSpec(
+        id=MODEL_ID,
+        owned_by=MODEL_OWNED_BY,
+        aliases=frozenset({MODEL_ID, f"{MODEL_OWNED_BY}/{MODEL_ID}"}),
+        subdir=MODEL_ID,
+    ),
+    ModelSpec(
+        id=BGE_M3_MODEL_ID,
+        owned_by=BGE_M3_OWNED_BY,
+        aliases=frozenset({BGE_M3_MODEL_ID, f"{BGE_M3_OWNED_BY}/{BGE_M3_MODEL_ID}"}),
+        subdir=BGE_M3_MODEL_ID,
+    ),
+)
+
+MODEL_IDS: tuple[str, ...] = tuple(spec.id for spec in MODEL_SPECS)
+MODEL_ALIASES: dict[str, str] = {
+    alias: spec.id
+    for spec in MODEL_SPECS
+    for alias in spec.aliases
+}
+SUPPORTED_MODELS = frozenset(MODEL_ALIASES.keys())
 MAIN_PORT = 8000
+
+
+def resolve_model_id(name: str) -> str | None:
+    """Normalize a supported model name or Hugging Face alias to its canonical ID."""
+    return MODEL_ALIASES.get(name)
+
+
+def resolve_model_paths(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Resolve local checkpoint directories for all registered models from MODELS_DIR / MODEL_PATH."""
+    env = os.environ if environ is None else environ
+    raw_models_dir = env.get("MODELS_DIR", "").strip()
+    raw_model_path = env.get("MODEL_PATH", "").strip()
+    models_dir = Path(raw_models_dir or DEFAULT_MODELS_DIR)
+
+    paths: dict[str, str] = {}
+    for spec in MODEL_SPECS:
+        if spec.id == MODEL_ID and raw_model_path:
+            paths[spec.id] = raw_model_path
+        else:
+            paths[spec.id] = str(models_dir / spec.subdir)
+    return paths
+
+
+def should_validate_all_model_paths(environ: Mapping[str, str] | None = None) -> bool:
+    """Return True when startup should require every registered model directory to exist upfront."""
+    env = os.environ if environ is None else environ
+    raw_models_dir = env.get("MODELS_DIR", "").strip()
+    raw_model_path = env.get("MODEL_PATH", "").strip()
+    return bool(raw_models_dir) or not raw_model_path
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 180
 MIN_IDLE_TIMEOUT_SECONDS = 0
@@ -79,7 +147,8 @@ class WorkerController(Protocol):
 
     def classify_batch(
         self,
-        items: Sequence[tuple[str, list[str] | dict[str, str | None], str, str | None]],
+        items: Sequence[tuple[Any, ...]],
+        **kwargs: Any,
     ) -> list[tuple[str, Any]]: ...
 
 

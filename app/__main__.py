@@ -16,7 +16,7 @@ from .admin import AdminConfig, create_admin_app, load_admin_config, resolve_bin
 from .api import create_app
 from .api_keys import APIKeyStore
 from .db import create_postgres_api_key_store
-from .runtime import MAIN_PORT, ChoiceRuntime
+from .runtime import MAIN_PORT, MODEL_ID, ChoiceRuntime, resolve_model_paths, should_validate_all_model_paths
 from .worker import validate_runtime_config
 
 
@@ -141,8 +141,10 @@ def main() -> None:
     api_key_store: APIKeyStore | None = None
     try:
         runtime = ChoiceRuntime.from_env()
+        model_paths = resolve_model_paths()
+        model_target = model_paths if should_validate_all_model_paths() else model_paths[MODEL_ID]
         validate_runtime_config(
-            os.environ.get("MODEL_PATH", "/opt/models/amber-150m"),
+            model_target,
             device=os.environ.get("DEVICE", "cuda"),
             precision=os.environ.get("PRECISION"),
             idle_timeout=runtime.initial_worker_idle_timeout(),

@@ -216,8 +216,18 @@ def _make_fake_ml_modules():
                 return _FakeTensor([[x] for x in self._data[item[0]]], dtype=self.dtype, device=self.device)
             if isinstance(item, tuple) and len(item) == 2 and item[0] is None and isinstance(item[1], slice):
                 return _FakeTensor([self._data[item[1]]], dtype=self.dtype, device=self.device)
-            # 4D slice: query[:, :, s:e]
+            # 4D slice: query[:, :, s:e] or mask[:, :, s:e, :]
             if isinstance(item, tuple) and len(item) == 3 and item[0] == slice(None) and item[1] == slice(None) and isinstance(item[2], slice):
+                sl = item[2]
+                return _FakeTensor([[head[sl] for head in batch] for batch in self._data], dtype=self.dtype, device=self.device)
+            if (
+                isinstance(item, tuple)
+                and len(item) == 4
+                and item[0] == slice(None)
+                and item[1] == slice(None)
+                and isinstance(item[2], slice)
+                and item[3] == slice(None)
+            ):
                 sl = item[2]
                 return _FakeTensor([[head[sl] for head in batch] for batch in self._data], dtype=self.dtype, device=self.device)
             raise NotImplementedError(f"Unsupported __getitem__: {item!r}")
@@ -491,6 +501,53 @@ def _make_fake_ml_modules():
             data = [[[float(tok) * 0.01 for _ in range(hidden)] for tok in row] for row in input_ids._data]
             return types.SimpleNamespace(last_hidden_state=_FakeTensor(data, dtype=torch_mod.float32, device=input_ids.device))
 
+    class _FakeNliConfig:
+        def __init__(self, data: dict[str, object] | None = None) -> None:
+            raw = data or {}
+            self.model_type = str(raw.get("model_type", "xlm-roberta"))
+            self.id2label = raw.get("id2label", {0: "entailment", 1: "not_entailment"})
+            self.max_position_embeddings = raw.get("max_position_embeddings", 8194)
+            self.pad_token_id = raw.get("pad_token_id", 1)
+
+    class _FakeNliModel(_Module):
+        def __init__(self, config: _FakeNliConfig, attn_implementation: str = "eager") -> None:
+            super().__init__()
+            self.config = config
+            self.config._attn_implementation = attn_implementation
+            self.calls: list[dict[str, object]] = []
+            self.to_calls: list[tuple[object, object]] = []
+            self.logit_fn = None
+
+        def to(self, device=None, dtype=None):
+            self.to_calls.append((str(device) if device is not None else None, str(dtype) if dtype is not None else None))
+            return super().to(device=device, dtype=dtype)
+
+        def forward(self, input_ids, attention_mask=None):
+            self.calls.append(
+                {
+                    "shape": input_ids.shape,
+                    "attn_impl": self.config._attn_implementation,
+                    "input_ids": input_ids.tolist(),
+                    "attention_mask": attention_mask.tolist() if attention_mask is not None else None,
+                    "device": str(input_ids.device),
+                }
+            )
+            if callable(self.logit_fn):
+                return types.SimpleNamespace(logits=self.logit_fn(input_ids, attention_mask))
+            rows = []
+            id2label = getattr(self.config, "id2label", {0: "entailment", 1: "not_entailment"})
+            num_labels = max(2, len(id2label))
+            for seq_ids, seq_mask in zip(input_ids._data, attention_mask._data):
+                real_tokens = [tok for tok, m in zip(seq_ids, seq_mask) if m == 1]
+                score = float(sum(real_tokens) % 100) * 0.05
+                row = [-score for _ in range(num_labels)]
+                # Put deterministic score at every entailment slot matching config
+                for raw_idx, raw_lbl in id2label.items():
+                    if isinstance(raw_lbl, str) and raw_lbl.strip().lower() == "entailment":
+                        row[int(raw_idx)] = score
+                rows.append(row)
+            return types.SimpleNamespace(logits=_FakeTensor(rows, dtype=torch_mod.float16, device=input_ids.device))
+
     class _FakeAutoConfig:
         calls: list[tuple[str, bool]] = []
 
@@ -499,34 +556,59 @@ def _make_fake_ml_modules():
             cls.calls.append((str(path), local_files_only))
             if not local_files_only:
                 raise AssertionError("Expected local_files_only=True")
+            cfg_file = Path(path) / "config.json"
+            if cfg_file.is_file() and Path(path).name != "encoder":
+                return _FakeNliConfig(json.loads(cfg_file.read_text(encoding="utf-8")))
             return _FakeEncConfig()
 
     class _FakeAutoTokenizer:
-        calls: list[tuple[str, bool]] = []
+        calls: list[tuple[str, bool, object]] = []
 
-        def __init__(self) -> None:
+        def __init__(self, *, pad_token_id: int = 0) -> None:
             self.cls_token_id = 101
             self.sep_token_id = 102
             self.mask_token_id = 103
-            self.pad_token_id = 0
+            self.pad_token_id = pad_token_id
+            self.pair_calls: list[tuple[list[str], list[str]]] = []
 
         @classmethod
-        def from_pretrained(cls, path, local_files_only: bool = False):
-            cls.calls.append((str(path), local_files_only))
+        def from_pretrained(cls, path, local_files_only: bool = False, use_fast: bool | None = None):
+            cls.calls.append((str(path), local_files_only, use_fast))
             if not local_files_only:
                 raise AssertionError("Expected local_files_only=True")
-            return cls()
+            cfg_file = Path(path) / "config.json"
+            if cfg_file.is_file() and Path(path).name != "encoder":
+                raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+                return cls(pad_token_id=raw.get("pad_token_id", 1))
+            return cls(pad_token_id=0)
 
-        def __call__(self, texts: list[str], add_special_tokens: bool = False):
-            assert add_special_tokens is False
-            # Map each whitespace-separated word to an integer token ID (or repeat tokens for long-input tests)
-            out = []
-            for text in texts:
+        def __call__(
+            self,
+            texts: list[str],
+            text_pair: list[str] | None = None,
+            *,
+            add_special_tokens: bool = False,
+            truncation: bool | None = None,
+            padding: bool | None = None,
+        ):
+            def _encode_words(text: str) -> list[int]:
                 if not text:
-                    out.append([])
-                else:
-                    out.append([1000 + (sum(ord(ch) for ch in tok) % 500) for tok in text.split()])
-            return {"input_ids": out}
+                    return []
+                return [1000 + (sum(ord(ch) for ch in tok) % 500) for tok in text.split()]
+
+            if text_pair is not None:
+                assert add_special_tokens is True
+                assert truncation is False
+                assert padding is False
+                self.pair_calls.append((list(texts), list(text_pair)))
+                out = [
+                    [0, *_encode_words(p), 2, 2, *_encode_words(h), 2]
+                    for p, h in zip(texts, text_pair, strict=True)
+                ]
+                return {"input_ids": out}
+
+            assert add_special_tokens is False
+            return {"input_ids": [_encode_words(text) for text in texts]}
 
     class _FakeModelCls:
         _supports_sdpa = True
@@ -538,10 +620,24 @@ def _make_fake_ml_modules():
         def from_config(cls, cfg, attn_implementation: str = "eager"):
             return _FakeEncoder(cfg, attn_implementation=attn_implementation)
 
+    class _FakeAutoModelForSequenceClassification:
+        _model_mapping = {_FakeNliConfig: _FakeModelCls}
+        calls: list[tuple[str, bool, str]] = []
+
+        @classmethod
+        def from_pretrained(cls, path, local_files_only: bool = False, attn_implementation: str = "eager"):
+            cls.calls.append((str(path), local_files_only, attn_implementation))
+            if not local_files_only:
+                raise AssertionError("Expected local_files_only=True")
+            cfg_file = Path(path) / "config.json"
+            cfg = _FakeNliConfig(json.loads(cfg_file.read_text(encoding="utf-8")))
+            return _FakeNliModel(cfg, attn_implementation=attn_implementation)
+
     transformers_mod.AttentionInterface = _FakeAttentionInterface
     transformers_mod.AutoConfig = _FakeAutoConfig
     transformers_mod.AutoTokenizer = _FakeAutoTokenizer
     transformers_mod.AutoModel = _FakeAutoModel
+    transformers_mod.AutoModelForSequenceClassification = _FakeAutoModelForSequenceClassification
 
     # Fake safetensors.torch
     safetensors_mod = types.ModuleType("safetensors")
@@ -572,7 +668,9 @@ def _make_fake_ml_modules():
         "AutoConfig": _FakeAutoConfig,
         "AutoTokenizer": _FakeAutoTokenizer,
         "AutoModel": _FakeAutoModel,
+        "AutoModelForSequenceClassification": _FakeAutoModelForSequenceClassification,
         "FakeEncConfig": _FakeEncConfig,
+        "FakeNliConfig": _FakeNliConfig,
         "FakeModelCls": _FakeModelCls,
         "FakeTensor": _FakeTensor,
     }
@@ -957,6 +1055,297 @@ class AmberModelUnitTests(unittest.TestCase):
             self.assertEqual(str(rotary.local_inv_freq.dtype), "torch.float32")
             self.assertEqual(str(rotary.local_inv_freq.device), "cuda")
             self.assertEqual(rotary.local_inv_freq.tolist(), expected_local)
+
+
+def _create_mock_nli_dir(
+    tmpdir: str,
+    *,
+    id2label: dict[str, str] | dict[int, str] | None = None,
+    max_position_embeddings: int = 8194,
+    pad_token_id: int = 1,
+    model_type: str = "xlm-roberta",
+) -> Path:
+    root = Path(tmpdir)
+    root.mkdir(parents=True, exist_ok=True)
+    cfg = {
+        "model_type": model_type,
+        "id2label": id2label if id2label is not None else {"0": "entailment", "1": "not_entailment"},
+        "max_position_embeddings": max_position_embeddings,
+        "pad_token_id": pad_token_id,
+    }
+    (root / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (root / "model.safetensors").write_bytes(b"fake-nli-safetensors")
+    (root / "tokenizer.json").write_text("{}", encoding="utf-8")
+    return root
+
+
+class NliModelUnitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _FAKE_STATE["cuda_state"]["available"] = False  # type: ignore[index]
+        _FAKE_STATE["sdpa_calls"].clear()  # type: ignore[attr-defined]
+        _FAKE_STATE["AutoTokenizer"].calls.clear()  # type: ignore[attr-defined]
+        _FAKE_STATE["AutoModelForSequenceClassification"].calls.clear()  # type: ignore[attr-defined]
+        _FAKE_STATE["FakeModelCls"]._supports_sdpa = True  # type: ignore[attr-defined]
+
+    def test_nli_load_detection_entailment_resolution_and_cpu_first_fp16(self) -> None:
+        m = _MODEL_MOD
+        assert m is not None
+        _FAKE_STATE["cuda_state"]["available"] = True  # type: ignore[index]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nli_dir = _create_mock_nli_dir(
+                tmpdir,
+                id2label={"0": "contradiction", "1": "neutral", "2": "ENTAILMENT"},
+                max_position_embeddings=8194,
+                pad_token_id=1,
+            )
+            bundle = m.load_model(str(nli_dir), "cuda", "fp16")
+            self.assertIsInstance(bundle, m.NliBundle)
+            self.assertEqual(bundle.entailment_idx, 2)
+            self.assertEqual(bundle.max_tokens, 8192)
+            self.assertEqual(bundle.pad_token_id, 1)
+            self.assertEqual(bundle.attn_impl, "sdpa")
+            self.assertTrue(bundle.chunked_sdpa)
+            # Offline + use_fast=True enforced
+            self.assertEqual(_FAKE_STATE["AutoTokenizer"].calls[-1], (str(nli_dir), True, True))  # type: ignore[index]
+            # CPU-first FP16 downcast occurs before moving weights onto CUDA
+            self.assertEqual(bundle.model.to_calls[0], (None, "torch.float16"))
+            self.assertEqual(bundle.model.to_calls[1], ("cuda", "torch.float16"))
+            # choice_chunked_sdpa is registered eagerly at load time (once, no duplicates on reload)
+            self.assertIn(m.NLI_CHUNKED_SDPA_NAME, _FAKE_STATE["attn_registry"])  # type: ignore[operator]
+            before_count = _FAKE_STATE["register_calls"].count(m.NLI_CHUNKED_SDPA_NAME)  # type: ignore[attr-defined]
+            m.load_model(str(nli_dir), "cpu", "fp32")
+            self.assertEqual(_FAKE_STATE["register_calls"].count(m.NLI_CHUNKED_SDPA_NAME), before_count)  # type: ignore[attr-defined]
+
+            # Missing or ambiguous entailment label in id2label is rejected
+            bad_dir = _create_mock_nli_dir(tmpdir + "_no_ent", id2label={"0": "yes", "1": "no"})
+            with self.assertRaises(RuntimeError):
+                m.load_model(str(bad_dir), "cpu", "fp32")
+
+            dup_dir = _create_mock_nli_dir(
+                tmpdir + "_dup_ent",
+                id2label={"0": "entailment", "1": "ENTAILMENT"},
+            )
+            with self.assertRaises(RuntimeError):
+                m.load_model(str(dup_dir), "cpu", "fp32")
+
+    def test_nli_hypothesis_formatting_entailment_softmax_and_token_limit(self) -> None:
+        m = _MODEL_MOD
+        assert m is not None
+        T = _FAKE_STATE["FakeTensor"]  # type: ignore[assignment]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nli_dir = _create_mock_nli_dir(
+                tmpdir,
+                id2label={"0": "not_entailment", "1": "entailment"},
+                max_position_embeddings=8194,
+                pad_token_id=1,
+            )
+            bundle = m.load_model(str(nli_dir), "cpu", "fp32")
+
+            # Custom logit function returning known entailment logits (at index 1!) keyed by hypothesis token signature,
+            # proving per-label logit attribution stays exact even when pairs are sorted by length before forward pass!
+            expected_by_label = {"billing": 2.0, "tech": 0.0, "other": -1.0}
+            billing_tok = 1000 + (sum(ord(ch) for ch in "billing:") % 500)
+            tech_tok = 1000 + (sum(ord(ch) for ch in "tech") % 500)
+            other_tok = 1000 + (sum(ord(ch) for ch in "other") % 500)
+            tok_to_logit = {
+                billing_tok: expected_by_label["billing"],
+                tech_tok: expected_by_label["tech"],
+                other_tok: expected_by_label["other"],
+            }
+
+            def _logit_fn(input_ids, _mask):
+                rows = []
+                for row_ids in input_ids.tolist():
+                    matched = [val for tok, val in tok_to_logit.items() if tok in row_ids]
+                    assert len(matched) == 1, f"Unexpected row tokens: {row_ids}"
+                    e = matched[0]
+                    # Index 0 is not_entailment (deliberately inverted to prove index 1 is used!)
+                    rows.append([100.0 - e, e])
+                return T(rows, dtype=_MODEL_MOD.torch.float16, device=input_ids.device)
+
+            bundle.model.logit_fn = _logit_fn
+
+            # 1. With prompt + label descriptions (and None/blank description fallback)
+            res = m.classify_batch(
+                bundle,
+                [
+                    (
+                        "결제가 중복되었습니다",
+                        {"billing": "결제 및 환불", "tech": None, "other": "   "},
+                        "triage",
+                        "이 문의의 카테고리는:",
+                    )
+                ],
+            )
+            self.assertEqual(res[0][0], "ok")
+            choice, probs, token_count = res[0][1]
+            self.assertEqual(choice, "billing")
+            self.assertEqual(list(probs.keys()), ["billing", "tech", "other"])
+            # Exact FP32 softmax over [2.0, 0.0, -1.0]
+            expected_logits = [expected_by_label["billing"], expected_by_label["tech"], expected_by_label["other"]]
+            exps = [math.exp(v - 2.0) for v in expected_logits]
+            denom = sum(exps)
+            for name, exp_val in zip(["billing", "tech", "other"], exps):
+                self.assertAlmostEqual(probs[name], exp_val / denom, places=6)
+            self.assertGreater(token_count, 0)
+
+            premises, hyps = bundle.tokenizer.pair_calls[-1]
+            self.assertEqual(premises, ["결제가 중복되었습니다"] * 3)
+            self.assertEqual(
+                hyps,
+                [
+                    "이 문의의 카테고리는: billing: 결제 및 환불",
+                    "이 문의의 카테고리는: tech",
+                    "이 문의의 카테고리는: other",
+                ],
+            )
+
+            # 2. Without prompt: default "This example is {label_text}."
+            bundle.model.logit_fn = None
+            choice2, probs2 = m.classify_text(
+                bundle,
+                "Great service",
+                {"positive": "Happy customer", "negative": None},
+                prompt=None,
+            )
+            self.assertIn(choice2, {"positive", "negative"})
+            self.assertAlmostEqual(sum(probs2.values()), 1.0, places=6)
+            _, hyps2 = bundle.tokenizer.pair_calls[-1]
+            self.assertEqual(
+                hyps2,
+                [
+                    "This example is positive: Happy customer.",
+                    "This example is negative.",
+                ],
+            )
+
+            # 2b. Non-string label keys raise ValueError (not AttributeError)
+            with self.assertRaises(ValueError):
+                m._build_nli_hypotheses({123: "desc", "b": "ok"}, prompt=None)  # type: ignore[dict-item]
+            with self.assertRaises(ValueError):
+                m._build_nli_hypotheses([123, "ok"], prompt=None)  # type: ignore[list-item]
+
+            # 3. Strict token limit: 8192 passes, 8193 raises InputTooLongError (no silent truncation)
+            # Hypothesis "This example is a." -> 4 words + 4 special tokens ([0] + text + [2,2] + hyp + [2]) = 8 overhead tokens
+            exact_text = " ".join(["w"] * (8192 - 8))
+            ok_res = m.classify_batch(bundle, [(exact_text, ["a", "b"], "decision", None)])
+            self.assertEqual(ok_res[0][0], "ok")
+
+            over_text = " ".join(["w"] * (8192 - 7))
+            with self.assertRaises(m.InputTooLongError) as cm:
+                m.classify_text(bundle, over_text, ["a", "b"])
+            self.assertIn("8,192", str(cm.exception))
+
+            # Batch isolates oversized item without failing valid neighbor
+            mixed = m.classify_batch(
+                bundle,
+                [
+                    (over_text, ["a", "b"], "decision", None),
+                    ("short text", ["a", "b"], "decision", None),
+                ],
+            )
+            self.assertEqual(mixed[0][0], "input_too_long")
+            self.assertEqual(mixed[1][0], "ok")
+
+            # NaN/Inf logits are rejected cleanly
+            bundle.model.logit_fn = lambda inp, _m: T(
+                [[0.0, float("nan")] for _ in range(inp.shape[0])],
+                dtype=_MODEL_MOD.torch.float32,
+                device=inp.device,
+            )
+            nan_res = m.classify_batch(bundle, [("hi", ["a", "b"], "decision", None)])
+            self.assertEqual(nan_res[0][0], "error")
+
+    def test_nli_vram_subbatch_chunking_and_long_chunked_sdpa(self) -> None:
+        m = _MODEL_MOD
+        assert m is not None
+        T = _FAKE_STATE["FakeTensor"]  # type: ignore[assignment]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nli_dir = _create_mock_nli_dir(tmpdir)
+            bundle = m.load_model(str(nli_dir), "cpu", "fp32")
+
+            # 1. 16 candidate labels with default NLI_MAX_PAIRS_PER_BATCH=8 chunks into >= 2 sub-batches (<= 8 pairs each)
+            labels_16 = [f"cat_{i}" for i in range(16)]
+            res16 = m.classify_batch(bundle, [("short korean text 테스트", labels_16, "decision", None)])
+            self.assertEqual(res16[0][0], "ok")
+            self.assertEqual(len(res16[0][1][1]), 16)
+            self.assertAlmostEqual(sum(res16[0][1][1].values()), 1.0, places=6)
+            self.assertEqual(len(bundle.model.calls), 2)
+            self.assertTrue(all(c["shape"][0] <= m.NLI_MAX_PAIRS_PER_BATCH for c in bundle.model.calls))
+
+            # 2. Medium-length sequence (<= NLI_CHUNKED_SDPA_THRESHOLD=1024): quadratic attention cap splits
+            #    L=900 pairs (3 * 900^2 = 2.43M > 2M -> max 2 pairs per pass) using native "sdpa"
+            bundle.model.calls.clear()
+            med_text = " ".join(["t"] * 900)
+            res_med = m.classify_batch(bundle, [(med_text, ["a", "b", "c"], "decision", None)])
+            self.assertEqual(res_med[0][0], "ok")
+            self.assertEqual(len(bundle.model.calls), 2)
+            self.assertEqual([c["shape"][0] for c in bundle.model.calls], [2, 1])
+            self.assertTrue(all(c["attn_impl"] == "sdpa" for c in bundle.model.calls))
+
+            # 3. Long sequence (> NLI_CHUNKED_SDPA_THRESHOLD=1024) runs solo B=1 with choice_chunked_sdpa and restores _attn_implementation
+            bundle.model.calls.clear()
+            long_text = " ".join(["l"] * 2200)
+            res_long = m.classify_batch(bundle, [(long_text, ["a", "b"], "decision", None)])
+            self.assertEqual(res_long[0][0], "ok")
+            self.assertEqual(len(bundle.model.calls), 2)
+            self.assertTrue(all(c["shape"][0] == 1 for c in bundle.model.calls))
+            self.assertTrue(all(c["attn_impl"] == m.NLI_CHUNKED_SDPA_NAME for c in bundle.model.calls))
+            self.assertEqual(bundle.model.config._attn_implementation, "sdpa")
+
+            # Verify _attn_implementation is restored even when model forward raises
+            def _boom(_inp, _mask):
+                raise RuntimeError("simulated OOM")
+
+            bundle.model.logit_fn = _boom
+            with self.assertRaises(RuntimeError):
+                m.classify_batch(bundle, [(long_text, ["a", "b"], "decision", None)])
+            self.assertEqual(bundle.model.config._attn_implementation, "sdpa")
+
+            # 4. Unit test chunked_sdpa_attention blocking directly with 4D full mask, None, and 4D broadcast mask
+            _FAKE_STATE["sdpa_calls"].clear()  # type: ignore[attr-defined]
+            q = T([[[[0.1, 0.2] for _ in range(600)]]])  # (1, 1, 600, 2)
+            mask_4d = T([[[[0.0] * 600 for _ in range(600)]]])  # (1, 1, 600, 600)
+            out, weights = m.chunked_sdpa_attention(None, q, q, q, mask_4d, scaling=0.5)
+            self.assertIsNone(weights)
+            self.assertEqual(out.shape, (1, 600, 1, 2))
+            # 600 / NLI_SDPA_BLOCK (256) -> 3 blocks: 256, 256, 88
+            self.assertEqual(len(_FAKE_STATE["sdpa_calls"]), 3)  # type: ignore[arg-type]
+            self.assertEqual(_FAKE_STATE["sdpa_calls"][0]["q_shape"], (1, 1, m.NLI_SDPA_BLOCK, 2))  # type: ignore[index]
+            self.assertEqual(_FAKE_STATE["sdpa_calls"][0]["mask_shape"], (1, 1, m.NLI_SDPA_BLOCK, 600))  # type: ignore[index]
+            self.assertEqual(_FAKE_STATE["sdpa_calls"][2]["q_shape"], (1, 1, 600 - 2 * m.NLI_SDPA_BLOCK, 2))  # type: ignore[index]
+
+            _FAKE_STATE["sdpa_calls"].clear()  # type: ignore[attr-defined]
+            out_none, _ = m.chunked_sdpa_attention(None, q, q, q, None, scaling=0.5)
+            self.assertEqual(out_none.shape, (1, 600, 1, 2))
+            self.assertEqual([c["q_shape"][2] for c in _FAKE_STATE["sdpa_calls"]], [256, 256, 88])  # type: ignore[index]
+
+            bcast_mask = T([[[[0.0] * 600]]])
+            _FAKE_STATE["sdpa_calls"].clear()  # type: ignore[attr-defined]
+            out_bcast, _ = m.chunked_sdpa_attention(None, q, q, q, bcast_mask, scaling=0.5)
+            self.assertEqual(out_bcast.shape, (1, 600, 1, 2))
+            self.assertEqual(
+                [c["mask_shape"] for c in _FAKE_STATE["sdpa_calls"]],  # type: ignore[index]
+                [(1, 1, 1, 600), (1, 1, 1, 600), (1, 1, 1, 600)],
+            )
+
+            # Reject B > 1 unmasked calls in chunked_sdpa_attention (protects against transformers None mask)
+            q_b2 = T([[[[0.1, 0.2] for _ in range(16)]], [[[0.1, 0.2] for _ in range(16)]]])
+            with self.assertRaises(ValueError):
+                m.chunked_sdpa_attention(None, q_b2, q_b2, q_b2, None)
+
+            # 5. Mid-length pair (> NLI_CHUNKED_SDPA_THRESHOLD=1024, <= LONG=2048) also activates chunked SDPA
+            bundle.model.calls.clear()
+            bundle.model.logit_fn = None
+            text_1200 = " ".join(["k"] * 1200)
+            res_1200 = m.classify_batch(bundle, [(text_1200, ["a", "b"], "decision", None)])
+            self.assertEqual(res_1200[0][0], "ok")
+            self.assertEqual(len(bundle.model.calls), 2)
+            self.assertTrue(all(c["attn_impl"] == m.NLI_CHUNKED_SDPA_NAME for c in bundle.model.calls))
+            self.assertEqual(bundle.model.config._attn_implementation, "sdpa")
 
 
 if __name__ == "__main__":

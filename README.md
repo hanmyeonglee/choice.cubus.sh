@@ -1,11 +1,14 @@
 # choice.cubus.sh
 
-A FastAPI classification server backed directly by
-[Amber 150M](https://huggingface.co/MLukauskas/amber-150m) (`MLukauskas/amber-150m`, 151M parameters, `CC-BY-NC-4.0`, English-primary) exposing an industry-standard Jina AI / OpenAI-style `/v1` API.
-It loads one fixed model in an on-demand worker subprocess using FP16 on CUDA (or FP32 on CPU), dynamic micro-batching (`coalesce_ms=5.0`, `max_batch_size=32`, `token_budget=8192` for `<= 2,048` tokens), O(L) banded attention for long sequences (`> 2,048` tokens), and a hard 7,999-token prepared input budget.
+A FastAPI classification server backed by:
+
+- **[Amber 150M](https://huggingface.co/MLukauskas/amber-150m)** (`amber-150m` / `MLukauskas/amber-150m`, 151M parameters, `CC-BY-NC-4.0`, fast English-primary uni-encoder, up to 7,999 prepared tokens) — default model.
+- **[BGE-M3 Zero-Shot v2.0](https://huggingface.co/MoritzLaurer/bge-m3-zeroshot-v2.0)** (`bge-m3-zeroshot-v2.0` / `MoritzLaurer/bge-m3-zeroshot-v2.0`, 568M parameters, multilingual / Korean XLM-RoBERTa NLI classifier, up to 8,192 tokens per text/hypothesis pair).
+
+It exposes an industry-standard Jina AI / OpenAI-style `/v1` API backed by a **single-resident on-demand worker subprocess** using FP16 on CUDA (or FP32 on CPU). At most one model is loaded in GPU VRAM at a time: switching between `amber-150m` and `bge-m3-zeroshot-v2.0` cleanly terminates the active worker subprocess (releasing 100% of its CUDA context and VRAM) before loading the requested model, keeping memory safe on a 3 GB GTX 1060.
 
 ```text
-Client → cubus shared ingress → FastAPI :8000 → Dynamic Micro-Batch Worker → Amber 150M / GPU
+Client → cubus shared ingress → FastAPI :8000 → Single-Resident Micro-Batch Worker → Amber 150M | BGE-M3 Zero-Shot / GPU
 ```
 
 ## Repository layout
@@ -50,7 +53,7 @@ For isolated precision, format ablation, and System One model comparisons, see
 |---|---|---|
 | `POST /v1/classify` | Classify 1–64 inputs against 2–16 competing candidate labels | Bearer / `X-API-Key` |
 | `GET /v1/models` | List available classification models | Bearer / `X-API-Key` |
-| `GET /healthz` | Server readiness, model residency (`model_loaded`), and `model` ID | None |
+| `GET /healthz` | Server readiness, model residency (`model_loaded`), active `model`, and available `models` | None |
 | `GET /` | Introduction and request example | None |
 | `GET /docs` | Swagger UI documentation and interactive requests | None |
 | `GET /openapi.json` | OpenAPI schema | None |
@@ -114,7 +117,10 @@ Scores in this response example are illustrative:
 }
 ```
 
-- `model`: optional string defaulting to `"amber-150m"` (also accepts `"MLukauskas/amber-150m"`). Unknown model names return HTTP `400`.
+- `model`: optional string defaulting to `"amber-150m"`. Supported models and aliases:
+  - `"amber-150m"` (alias `"MLukauskas/amber-150m"`): fast English-primary classifier (hard 7,999 prepared subword token limit).
+  - `"bge-m3-zeroshot-v2.0"` (alias `"MoritzLaurer/bge-m3-zeroshot-v2.0"`): multilingual / Korean NLI zero-shot classifier (hard 8,192 subword token limit per text/hypothesis pair; VRAM-chunked forward passes with FP32 entailment softmax).
+  Unknown model names return HTTP `400`.
 - `input`: required — accepts a single string, a single `{"text": str | dict | list}` object, or a non-empty list of 1–64 strings and/or `{"text": str | dict | list}` objects. Objects and arrays inside `text` are serialized as compact JSON. Each serialized item defaults to an 8,000-character limit (configurable 100–16,000 via the Admin API), and request bodies are capped at 256 KiB.
 - `labels`: 2–16 distinct candidate labels (subject to runtime `max_labels`). Pass either:
   - a list of label names (e.g., `["negative", "neutral", "positive"]`), or
@@ -124,8 +130,8 @@ Scores in this response example are illustrative:
 - `data[i].predictions` is sorted descending by `score` (ties preserve requested label order), so `predictions[0].label == prediction` and `predictions[0].score == score`.
 - `usage.prompt_tokens` and `usage.total_tokens` report exact prepared subword token counts across the batch.
 - All `/v1/*` error responses (400, 401, 413, 422, 499, 503) use the standard OpenAI-style error envelope `{"error": {"message": "...", "type": "...", "code": "..."}}`.
-- Prepared sequences (input + task + prompt + labels and descriptions) exceeding 7,999 subword tokens are rejected with HTTP 422 rather than silently truncated.
-- Amber 150M is English-primary and trained on typed decision tasks; returned scores are softmax distributions over the provided candidates and are not calibrated probabilities of truth.
+- Oversized sequences exceeding the active model's token limit (7,999 for `amber-150m`; 8,192 per pair for `bge-m3-zeroshot-v2.0`) are rejected with HTTP 422 rather than silently truncated.
+- Returned scores are softmax distributions over the provided candidates and are not calibrated probabilities of truth.
 
 ### Writing effective classification requests
 
@@ -148,12 +154,15 @@ Standalone local `docker-compose.yml` brings up a local `postgres:18.7-alpine3.2
 - `DATABASE_URL`: standalone PostgreSQL DSN used when `DB_BROKER_URL` is unset.
 - `DEVICE`: defaults to `cuda`. Set to `cpu` explicitly for CPU execution. CUDA mode refuses to start if no GPU is available.
 - `PRECISION`: defaults to `fp16` on `cuda` and `fp32` on `cpu`.
-- `IDLE_TIMEOUT_SECONDS`: defaults to `180` (3 minutes). The model loads in a dedicated dynamic micro-batching worker subprocess on the first classification request and terminates after `IDLE_TIMEOUT_SECONDS` of inactivity, releasing 100% of GPU VRAM (including the CUDA context). Set to `0` to pre-load on startup and keep the model resident permanently.
-- `MODEL_PATH`: defaults to `/opt/models/amber-150m`.
+- `IDLE_TIMEOUT_SECONDS`: defaults to `180` (3 minutes). The active model loads in a dedicated single-resident micro-batching worker subprocess on demand and terminates after `IDLE_TIMEOUT_SECONDS` of inactivity (or immediately when swapping to another model), releasing 100% of GPU VRAM (including the CUDA context). Set to `0` to pre-load `amber-150m` on startup and keep the active model resident until swapped.
+- `MODELS_DIR`: defaults to `/opt/models` (contains `amber-150m/` and `bge-m3-zeroshot-v2.0/`).
+- `MODEL_PATH`: optional backward-compatible override for `amber-150m` (defaults to `<MODELS_DIR>/amber-150m`).
 - Model weights and tokenizer files are included in the image; there are no external downloads at runtime.
 - uv is used only to install locked dependencies during the build. The runtime image does not include uv.
 - Uses PyTorch 2.7.1+cu126, Transformers 5.16.1, Safetensors 0.8.0, FastAPI 0.143.3, Uvicorn 0.54.0, and `psycopg[binary,pool]` 3.3.9. All dependencies are pinned in `uv.lock`.
-- Model revision: `51ee1bba1f9e71aae4bf65bde1d43216260b6aab`.
+- Pinned model revisions:
+  - `MLukauskas/amber-150m`: `51ee1bba1f9e71aae4bf65bde1d43216260b6aab`
+  - `MoritzLaurer/bge-m3-zeroshot-v2.0`: `9abf1c8aaeb82a2447809c20753ed0b106b76652`
 
 ### Optional Internal Admin API (`:9090`)
 
@@ -166,7 +175,7 @@ Set `ADMIN_API_TOKEN` (minimum 16 bytes, not a `replace-with-*` placeholder) to 
 
 Endpoints:
 
-- `GET /admin/v1/manifest`: service capabilities and settings schema (`service: "choice"`, `version: "0.3.0"`, `model: "amber-150m"`, `capabilities: ["settings", "classify", "api_keys"]`).
+- `GET /admin/v1/manifest`: service capabilities and settings schema (`service: "choice"`, `version: "0.3.0"`, `model: "amber-150m"`, `models: ["amber-150m", "bge-m3-zeroshot-v2.0"]`, `capabilities: ["settings", "classify", "api_keys"]`).
 - `GET /admin/v1/settings`: current runtime values (`accept_requests`, `idle_timeout_seconds`, `max_text_chars`, `max_labels`; never exposes secrets).
 - `PATCH /admin/v1/settings`: atomically validates and applies runtime settings live (`accept_requests=false` makes `POST /v1/classify` return `503` while `/healthz`, `/v1/models`, and the Admin API stay up; `idle_timeout_seconds` dynamically updates worker eviction).
 - `POST /admin/v1/classify`: internal classification endpoint using the same industry-standard request/response schema as `/v1/classify` (`model`, `input` of 1–64 strings or `{"text": ...}` objects up to 16,000 chars each within a 256 KiB payload, optional `prompt` up to 512 chars, optional `task` up to 64 chars, `2–16` labels with optional descriptions up to 240 chars). Shares the single `ModelWorker` instance, isolates per-item token-limit/model errors as `{"object": "classification", "index": i, "error": "..."}` without failing the rest of the batch, and stays available even when `accept_requests=false`.

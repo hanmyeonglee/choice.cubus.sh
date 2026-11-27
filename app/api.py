@@ -1,4 +1,4 @@
-"""Industry-standard Jina AI / OpenAI-style classification API backed by Amber 150M."""
+"""Industry-standard Jina AI / OpenAI-style multi-model classification API."""
 
 from __future__ import annotations
 
@@ -23,7 +23,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .api_keys import APIKeyStore, APIKeyStoreError
 from .db import create_postgres_api_key_store
-from .runtime import APP_VERSION, MODEL_ID, MODEL_OWNED_BY, SUPPORTED_MODELS, ChoiceRuntime
+from .runtime import (
+    APP_VERSION,
+    MODEL_ID,
+    MODEL_IDS,
+    MODEL_SPECS,
+    SUPPORTED_MODELS,
+    ChoiceRuntime,
+    resolve_model_id,
+    resolve_model_paths,
+    should_validate_all_model_paths,
+)
 from .schemas import (
     ClassificationResult,
     ClassifyRequest,
@@ -268,9 +278,14 @@ def create_app(
         device = os.environ.get("DEVICE", "cuda")
         precision = os.environ.get("PRECISION")
         idle_timeout = active_runtime.initial_worker_idle_timeout()
+        model_paths = resolve_model_paths()
+        worker_model_arg: str | dict[str, str] = (
+            model_paths if should_validate_all_model_paths() else model_paths[MODEL_ID]
+        )
         try:
             worker = ModelWorker(
-                os.environ.get("MODEL_PATH", "/opt/models/amber-150m"),
+                worker_model_arg,
+                model_paths=model_paths,
                 device=device,
                 precision=precision,
                 idle_timeout=idle_timeout,
@@ -312,19 +327,22 @@ def create_app(
         version=APP_VERSION,
         description=(
             "Classify single or batched text inputs against candidate labels using Amber 150M "
-            "(`MLukauskas/amber-150m`) via an industry-standard Jina AI / OpenAI-style `/v1` API.\n\n"
+            "(`MLukauskas/amber-150m`, fast English-primary) or BGE-M3 Zero-Shot v2.0 "
+            "(`MoritzLaurer/bge-m3-zeroshot-v2.0`, multilingual/Korean NLI up to 8,192 tokens) "
+            "via an industry-standard Jina AI / OpenAI-style `/v1` API.\n\n"
             "### Writing requests\n\n"
             "Send `POST /v1/classify` with `input` (a single string, a `{\"text\": ...}` object, or a "
             "batch list of 1–64 strings and/or `{\"text\": ...}` objects) and `labels` (2–16 competing "
             "candidate labels as a list of strings or a label-to-description mapping). Optionally set "
-            "`model` (`amber-150m` or `MLukauskas/amber-150m`), `task` (defaults to `decision`), and "
+            "`model` (`amber-150m`, `MLukauskas/amber-150m`, `bge-m3-zeroshot-v2.0`, or "
+            "`MoritzLaurer/bge-m3-zeroshot-v2.0`), `task` (defaults to `decision`), and "
             "`prompt` (a question or classification instruction).\n\n"
             "- For binary or yes/no questions, supply two meaningful competing labels (such as "
             '`["no", "yes"]` or `{"safe": "Read-only inspection", "unsafe": "Modifies or deletes state"}`).\n'
             "- Include concise label descriptions when category boundaries are domain-specific.\n"
-            "- Each serialized input item defaults to an 8,000-character limit (configurable up to 16,000), "
-            "and each complete prepared sequence (input, task, prompt, and labels) is limited to 7,999 "
-            "subword tokens without silent truncation.\n\n"
+            "- Each serialized input item defaults to an 8,000-character limit (configurable up to 16,000). "
+            "Token limits (7,999 tokens for `amber-150m`; 8,192 tokens per pair for `bge-m3-zeroshot-v2.0`) "
+            "are enforced without silent truncation.\n\n"
             "### Results\n\n"
             "Each entry in `data` contains `prediction` (winning label), `score` (winning softmax score), "
             "and `predictions` sorted descending by score (ties preserve requested label order). "
@@ -491,7 +509,21 @@ def create_app(
 
     @app.get("/healthz", tags=["Server"], summary="Server readiness and model residency")
     async def healthz():
-        return {"ok": True, "model_loaded": app.state.worker.is_loaded(), "model": MODEL_ID}
+        worker = app.state.worker
+        loaded_model_fn = getattr(worker, "loaded_model", None)
+        if callable(loaded_model_fn):
+            active_model = loaded_model_fn()
+            model_loaded = active_model is not None
+            model = active_model or MODEL_ID
+        else:
+            model_loaded = worker.is_loaded()
+            model = MODEL_ID
+        return {
+            "ok": True,
+            "model_loaded": model_loaded,
+            "model": model,
+            "models": list(MODEL_IDS),
+        }
 
     @app.get(
         "/v1/models",
@@ -507,7 +539,7 @@ def create_app(
     async def list_models() -> ModelListResponse:
         return ModelListResponse(
             object="list",
-            data=[ModelCard(id=MODEL_ID, object="model", owned_by=MODEL_OWNED_BY)],
+            data=[ModelCard(id=spec.id, object="model", owned_by=spec.owned_by) for spec in MODEL_SPECS],
         )
 
     @v1_classify_router.post(
@@ -520,7 +552,7 @@ def create_app(
             400: {"model": ErrorEnvelope, "description": "Unknown model or invalid Content-Length header"},
             401: {"model": ErrorEnvelope, "description": "Missing, invalid, revoked, or expired API key"},
             413: {"model": ErrorEnvelope, "description": "Request body exceeds 256 KiB limit"},
-            422: {"model": ErrorEnvelope, "description": "Invalid input or prepared sequence exceeds 7,999 tokens"},
+            422: {"model": ErrorEnvelope, "description": "Invalid input or prepared sequence exceeds model token limit"},
             499: {"model": ErrorEnvelope, "description": "Client disconnected or request cancelled"},
             503: {"model": ErrorEnvelope, "description": "Service is temporarily paused for maintenance or backend is unavailable"},
         },
@@ -534,7 +566,8 @@ def create_app(
                 "server_error",
                 "service_unavailable",
             )
-        if body.model not in SUPPORTED_MODELS:
+        canonical_model = resolve_model_id(body.model)
+        if canonical_model is None:
             supported = ", ".join(sorted(SUPPORTED_MODELS))
             return _openai_error_response(
                 400,
@@ -567,6 +600,8 @@ def create_app(
 
         if callable(classify_batch_fn):
             kwargs: dict[str, Any] = {}
+            if _supports_kwarg(classify_batch_fn, "model_id"):
+                kwargs["model_id"] = canonical_model
             if _supports_kwarg(classify_batch_fn, "cancel_event"):
                 kwargs["cancel_event"] = cancel_event
             if _supports_kwarg(classify_batch_fn, "plane"):
@@ -577,6 +612,8 @@ def create_app(
         else:
             classify_fn = worker.classify
             kwargs = {}
+            if _supports_kwarg(classify_fn, "model_id"):
+                kwargs["model_id"] = canonical_model
             if _supports_kwarg(classify_fn, "cancel_event"):
                 kwargs["cancel_event"] = cancel_event
             if _supports_kwarg(classify_fn, "plane"):
@@ -711,7 +748,7 @@ def create_app(
 
         return ClassifyResponse(
             object="list",
-            model=MODEL_ID,
+            model=canonical_model,
             data=data,
             usage=UsageInfo(prompt_tokens=total_tokens, total_tokens=total_tokens),
         )

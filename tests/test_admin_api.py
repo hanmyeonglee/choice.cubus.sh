@@ -29,7 +29,7 @@ from app.admin import (
 from app.api import create_app
 from app.api_keys import APIKeyStore, InMemoryAPIKeyBackend
 from app.db import DatabaseConfigError, resolve_database_config
-from app.runtime import APP_VERSION, MODEL_ID, SETTINGS_SCHEMA, ChoiceRuntime
+from app.runtime import APP_VERSION, BGE_M3_MODEL_ID, MODEL_ID, MODEL_IDS, SETTINGS_SCHEMA, ChoiceRuntime
 from app.worker import ModelWorker, WorkerInputTooLongError
 
 
@@ -450,6 +450,7 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(man["service"], "choice")
             self.assertEqual(man["version"], APP_VERSION)
             self.assertEqual(man["model"], MODEL_ID)
+            self.assertEqual(man["models"], list(MODEL_IDS))
             self.assertEqual(man["capabilities"], ["settings", "classify", "api_keys"])
             self.assertEqual(
                 man["endpoints"],
@@ -720,6 +721,29 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
                 json={"prompt": None, "labels": ["a", "b"], "input": ["hello"]},
             )
             self.assertEqual(null_prompt.status_code, 200)
+
+            # 5c. Multilingual bge-m3-zeroshot-v2.0 canonical ID & alias work and return canonical model ID
+            seen_admin_models: list[str] = []
+            orig_cb = worker.classify_batch
+
+            def _tracking_cb(items, *, model_id: str = MODEL_ID, **_kwargs):
+                seen_admin_models.append(model_id)
+                return orig_cb(items)
+
+            with patch.object(worker, "classify_batch", side_effect=_tracking_cb):
+                for req_model in (BGE_M3_MODEL_ID, f"MoritzLaurer/{BGE_M3_MODEL_ID}"):
+                    r_bge = await cli.post(
+                        "/admin/v1/classify",
+                        headers=headers,
+                        json={
+                            "model": req_model,
+                            "labels": ["정상", "이상"],
+                            "input": ["한국어 로그 분류 테스트"],
+                        },
+                    )
+                    self.assertEqual(r_bge.status_code, 200)
+                    self.assertEqual(r_bge.json()["model"], BGE_M3_MODEL_ID)
+            self.assertEqual(seen_admin_models, [BGE_M3_MODEL_ID, BGE_M3_MODEL_ID])
 
             # 6. Strict payload validation -> 400
             valid_base = {"labels": ["a", "b"], "input": ["ok"]}

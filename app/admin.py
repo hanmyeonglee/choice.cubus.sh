@@ -33,10 +33,12 @@ from .runtime import (
     APP_VERSION,
     MAIN_PORT,
     MODEL_ID,
+    MODEL_IDS,
     SETTINGS_SCHEMA,
     SUPPORTED_MODELS,
     ChoiceRuntime,
     SettingsValidationError,
+    resolve_model_id,
 )
 from .schemas import build_classification_result, render_text, unpack_classify_payload
 from .worker import WorkerCancelledError
@@ -389,7 +391,7 @@ def _validate_admin_input_item(entry: object, name: str) -> str:
 
 def _validate_classify_payload(
     parsed: dict[str, Any],
-) -> tuple[list[str], list[str] | dict[str, str | None], str, str | None]:
+) -> tuple[str, list[str], list[str] | dict[str, str | None], str, str | None]:
     allowed_top = {"model", "input", "labels", "task", "prompt"}
     unknown_top = sorted(set(parsed) - allowed_top)
     if unknown_top:
@@ -399,13 +401,16 @@ def _validate_classify_payload(
     if "input" not in parsed:
         raise SettingsValidationError("input is required")
 
+    canonical_model = MODEL_ID
     if "model" in parsed:
         raw_model = parsed["model"]
         if not isinstance(raw_model, str):
             raise SettingsValidationError("model must be a string")
-        if raw_model not in SUPPORTED_MODELS:
+        resolved = resolve_model_id(raw_model)
+        if resolved is None:
             supported = ", ".join(sorted(SUPPORTED_MODELS))
             raise SettingsValidationError(f"unknown model {raw_model!r}; supported models: {supported}")
+        canonical_model = resolved
 
     prompt: str | None = None
     if "prompt" in parsed and parsed["prompt"] is not None:
@@ -459,7 +464,7 @@ def _validate_classify_payload(
     else:
         raise SettingsValidationError("input must be a string, an object with 'text', or a non-empty list")
 
-    return validated_texts, validated_labels, task, prompt
+    return canonical_model, validated_texts, validated_labels, task, prompt
 
 
 def _error_response(
@@ -596,6 +601,7 @@ def create_admin_app(
             "service": "choice",
             "version": APP_VERSION,
             "model": MODEL_ID,
+            "models": list(MODEL_IDS),
             "capabilities": ["settings", "classify", "api_keys"],
             "endpoints": {
                 "settings_get": "GET /admin/v1/settings",
@@ -717,7 +723,7 @@ def create_admin_app(
             parsed = await _read_bounded_json_object(
                 request, MAX_ADMIN_CLASSIFY_BODY_BYTES, "classify payload"
             )
-            validated_texts, labels, task, prompt = _validate_classify_payload(parsed)
+            canonical_model, validated_texts, labels, task, prompt = _validate_classify_payload(parsed)
         except _AdminBodyError as exc:
             return _error_response(exc.status_code, str(exc))
         except SettingsValidationError as exc:
@@ -731,6 +737,8 @@ def create_admin_app(
         cancel_event = threading.Event()
         classify_batch_fn = worker.classify_batch
         kwargs: dict[str, Any] = {}
+        if _supports_kwarg(classify_batch_fn, "model_id"):
+            kwargs["model_id"] = canonical_model
         if _supports_kwarg(classify_batch_fn, "cancel_event"):
             kwargs["cancel_event"] = cancel_event
         if _supports_kwarg(classify_batch_fn, "plane"):
@@ -812,7 +820,7 @@ def create_admin_app(
             status_code=200,
             content={
                 "object": "list",
-                "model": MODEL_ID,
+                "model": canonical_model,
                 "data": data,
                 "usage": {
                     "prompt_tokens": total_tokens,

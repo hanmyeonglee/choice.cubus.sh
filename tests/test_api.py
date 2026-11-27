@@ -12,7 +12,7 @@ import httpx
 
 from app.api import MAX_PUBLIC_BODY_BYTES, create_app
 from app.api_keys import APIKeyStore, InMemoryAPIKeyBackend
-from app.runtime import MODEL_ID, MODEL_OWNED_BY, ChoiceRuntime
+from app.runtime import BGE_M3_MODEL_ID, BGE_M3_OWNED_BY, MODEL_ID, MODEL_IDS, MODEL_OWNED_BY, ChoiceRuntime
 from app.worker import WorkerCancelledError, WorkerInputTooLongError
 
 
@@ -131,7 +131,10 @@ class PublicAPITests(unittest.IsolatedAsyncioTestCase):
                     # /healthz (unauthenticated)
                     hz = await cli.get("/healthz")
                     self.assertEqual(hz.status_code, 200)
-                    self.assertEqual(hz.json(), {"ok": True, "model_loaded": False, "model": MODEL_ID})
+                    self.assertEqual(
+                        hz.json(),
+                        {"ok": True, "model_loaded": False, "model": MODEL_ID, "models": list(MODEL_IDS)},
+                    )
 
                     # GET /v1/models requires auth and returns OpenAI error envelope on 401
                     m401 = await cli.get("/v1/models")
@@ -144,7 +147,10 @@ class PublicAPITests(unittest.IsolatedAsyncioTestCase):
                         m_bearer.json(),
                         {
                             "object": "list",
-                            "data": [{"id": MODEL_ID, "object": "model", "owned_by": MODEL_OWNED_BY}],
+                            "data": [
+                                {"id": MODEL_ID, "object": "model", "owned_by": MODEL_OWNED_BY},
+                                {"id": BGE_M3_MODEL_ID, "object": "model", "owned_by": BGE_M3_OWNED_BY},
+                            ],
                         },
                     )
                     m_xapi = await cli.get("/v1/models", headers={"X-API-Key": public_key})
@@ -250,7 +256,10 @@ class PublicAPITests(unittest.IsolatedAsyncioTestCase):
 
                     # Healthz reflects model_loaded=True after request
                     hz_loaded = await cli.get("/healthz")
-                    self.assertEqual(hz_loaded.json(), {"ok": True, "model_loaded": True, "model": MODEL_ID})
+                    self.assertEqual(
+                        hz_loaded.json(),
+                        {"ok": True, "model_loaded": True, "model": MODEL_ID, "models": list(MODEL_IDS)},
+                    )
 
                     # Single {"text": dict}, single {"text": list}, and mixed batch list inputs
                     r_obj = await cli.post(
@@ -737,6 +746,96 @@ class PublicAPITests(unittest.IsolatedAsyncioTestCase):
                 body = json.loads(sent_messages[1]["body"].decode("utf-8"))
                 self.assertEqual(body["error"]["type"], "request_cancelled")
                 self.assertEqual(body["error"]["code"], "request_cancelled")
+
+    async def test_multi_model_routing_aliases_and_healthz_active_model(self) -> None:
+        class _MultiModelFakeWorker(_FakePublicWorker):
+            def __init__(self) -> None:
+                super().__init__()
+                self.active_model: str | None = None
+                self.seen_model_ids: list[str] = []
+                self.loaded_model_calls = 0
+                self.is_loaded_calls = 0
+
+            def is_loaded(self) -> bool:
+                self.is_loaded_calls += 1
+                return super().is_loaded()
+
+            def loaded_model(self) -> str | None:
+                self.loaded_model_calls += 1
+                return self.active_model if self.loaded else None
+
+            def classify_batch(self, items, *, model_id: str = MODEL_ID):
+                self.loaded = True
+                self.active_model = model_id
+                self.seen_model_ids.append(model_id)
+                return super().classify_batch(items)
+
+        runtime = ChoiceRuntime()
+        worker = _MultiModelFakeWorker()
+        store, public_key = _make_store_with_key()
+        headers = {"Authorization": f"Bearer {public_key}"}
+
+        with patch("app.api.ModelWorker", return_value=worker):
+            app = create_app(runtime=runtime, api_key_store=store)
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 50022)),
+                    base_url="http://public.local",
+                ) as cli:
+                    # Before any request, /healthz reports default amber-150m and model_loaded=False
+                    hz0 = await cli.get("/healthz")
+                    self.assertEqual(
+                        hz0.json(),
+                        {"ok": True, "model_loaded": False, "model": MODEL_ID, "models": list(MODEL_IDS)},
+                    )
+
+                    # Full Hugging Face alias for bge-m3-zeroshot-v2.0 normalizes to canonical ID
+                    r_bge_alias = await cli.post(
+                        "/v1/classify",
+                        headers=headers,
+                        json={
+                            "model": "MoritzLaurer/bge-m3-zeroshot-v2.0",
+                            "input": "결제가 두 번 되었어요.",
+                            "labels": {"결제": "결제 및 환불 문의", "기술": "오류 및 장애"},
+                        },
+                    )
+                    self.assertEqual(r_bge_alias.status_code, 200)
+                    self.assertEqual(r_bge_alias.json()["model"], BGE_M3_MODEL_ID)
+                    self.assertEqual(worker.seen_model_ids[-1], BGE_M3_MODEL_ID)
+
+                    # /healthz now reflects active resident model = bge-m3-zeroshot-v2.0
+                    hz1 = await cli.get("/healthz")
+                    self.assertEqual(
+                        hz1.json(),
+                        {"ok": True, "model_loaded": True, "model": BGE_M3_MODEL_ID, "models": list(MODEL_IDS)},
+                    )
+
+                    # Canonical ID works directly and switching back to amber-150m updates /healthz
+                    r_bge_canon = await cli.post(
+                        "/v1/classify",
+                        headers=headers,
+                        json={"model": BGE_M3_MODEL_ID, "input": "hello", "labels": ["a", "b"]},
+                    )
+                    self.assertEqual(r_bge_canon.status_code, 200)
+                    self.assertEqual(r_bge_canon.json()["model"], BGE_M3_MODEL_ID)
+
+                    r_amber = await cli.post(
+                        "/v1/classify",
+                        headers=headers,
+                        json={"model": "MLukauskas/amber-150m", "input": "hello", "labels": ["a", "b"]},
+                    )
+                    self.assertEqual(r_amber.status_code, 200)
+                    self.assertEqual(r_amber.json()["model"], MODEL_ID)
+                    self.assertEqual(worker.seen_model_ids, [BGE_M3_MODEL_ID, BGE_M3_MODEL_ID, MODEL_ID])
+
+                    hz2 = await cli.get("/healthz")
+                    self.assertEqual(
+                        hz2.json(),
+                        {"ok": True, "model_loaded": True, "model": MODEL_ID, "models": list(MODEL_IDS)},
+                    )
+                    # /healthz derives model_loaded + model atomically from a single loaded_model() call (no TOCTOU race)
+                    self.assertEqual(worker.loaded_model_calls, 3)
+                    self.assertEqual(worker.is_loaded_calls, 0)
 
 
 if __name__ == "__main__":

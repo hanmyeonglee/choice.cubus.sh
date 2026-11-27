@@ -1,4 +1,4 @@
-"""Load the fixed Amber 150M checkpoint and run bounded uni-encoder classification."""
+"""Load supported classification checkpoints (Amber 150M and BGE-M3 NLI zero-shot) and run bounded inference."""
 
 from __future__ import annotations
 
@@ -23,6 +23,15 @@ DEFAULT_TOKEN_BUDGET = 8192
 MAX_SDPA_ATTN_ELEMENTS = 4 * 1024 * 1024
 BANDED_ATTENTION_NAME = "amber_banded"
 
+# BGE-M3 zero-shot NLI (XLMRobertaForSequenceClassification, 16 heads) memory bounds for GTX 1060 3 GB.
+NLI_MAX_TOKENS = 8192
+NLI_MAX_PAIRS_PER_BATCH = 8
+NLI_TOKEN_BUDGET = 2048
+NLI_MAX_ATTN_ELEMENTS = 2 * 1024 * 1024
+NLI_CHUNKED_SDPA_NAME = "choice_chunked_sdpa"
+NLI_CHUNKED_SDPA_THRESHOLD = 1024
+NLI_SDPA_BLOCK = 256
+
 _PRECISIONS = {
     "fp16": torch.float16,
     "float16": torch.float16,
@@ -32,6 +41,7 @@ _PRECISIONS = {
 
 _BANDED_REG_LOCK = Lock()
 _REGISTERED_TARGETS: WeakSet[Any] = WeakSet()
+_CHUNKED_REGISTERED_TARGETS: WeakSet[Any] = WeakSet()
 
 
 class InputTooLongError(ValueError):
@@ -114,11 +124,78 @@ def _register_banded_attention() -> None:
         _REGISTERED_TARGETS.add(AttentionInterface)
 
 
-def _select_attention_impl(enc_cfg: Any) -> str:
-    """Choose SDPA when the encoder architecture supports it, otherwise eager."""
-    from transformers import AutoModel
+def chunked_sdpa_attention(
+    module: Any,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Any,
+    scaling: float | None = None,
+    dropout: float = 0.0,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, None]:
+    """Run query-blocked full SDPA to bound O(L^2) attention memory on 3 GB GPUs.
 
-    mapping = getattr(AutoModel, "_model_mapping", None)
+    Because transformers 5.x returns attention_mask=None for custom attention implementations
+    unregistered in ALL_MASK_ATTENTION_FUNCTIONS, unmasked calls MUST be unpadded B=1 to avoid
+    silently attending over pad tokens (and intentionally avoids allocating a 4D LxL mask in VRAM).
+    """
+    del module, dropout, kwargs
+    if attention_mask is None and query.shape[0] != 1:
+        raise ValueError("chunked_sdpa_attention requires an unpadded batch size of 1 when attention_mask is None.")
+    n = query.shape[2]
+    if n <= NLI_SDPA_BLOCK:
+        out = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            scale=scaling,
+        )
+        return out.transpose(1, 2).contiguous(), None
+
+    out = torch.empty_like(query)
+    mask_is_4d_full = (
+        attention_mask is not None
+        and hasattr(attention_mask, "shape")
+        and len(attention_mask.shape) == 4
+        and attention_mask.shape[2] == n
+    )
+    for s in range(0, n, NLI_SDPA_BLOCK):
+        e = min(n, s + NLI_SDPA_BLOCK)
+        block_mask = attention_mask[:, :, s:e, :] if mask_is_4d_full else attention_mask
+        out[:, :, s:e] = F.scaled_dot_product_attention(
+            query[:, :, s:e],
+            key,
+            value,
+            attn_mask=block_mask,
+            scale=scaling,
+        )
+    return out.transpose(1, 2).contiguous(), None
+
+
+def _register_chunked_sdpa_attention() -> None:
+    """Register choice_chunked_sdpa with transformers.AttentionInterface once per interface class."""
+    from transformers import AttentionInterface
+
+    with _BANDED_REG_LOCK:
+        mapping = getattr(AttentionInterface, "_global_mapping", None)
+        if isinstance(mapping, dict) and NLI_CHUNKED_SDPA_NAME in mapping:
+            return
+        if AttentionInterface in _CHUNKED_REGISTERED_TARGETS and not isinstance(mapping, dict):
+            return
+        AttentionInterface.register(NLI_CHUNKED_SDPA_NAME, chunked_sdpa_attention)
+        _CHUNKED_REGISTERED_TARGETS.add(AttentionInterface)
+
+
+def _select_attention_impl(enc_cfg: Any, auto_model_cls: Any | None = None) -> str:
+    """Choose SDPA when the encoder architecture supports it, otherwise eager."""
+    if auto_model_cls is None:
+        from transformers import AutoModel
+
+        auto_model_cls = AutoModel
+
+    mapping = getattr(auto_model_cls, "_model_mapping", None)
     if mapping is None:
         return "eager"
     try:
@@ -283,6 +360,63 @@ class AmberBundle:
     sliding_window: int
 
 
+@dataclass(frozen=True, slots=True)
+class NliBundle:
+    """Loaded Hugging Face NLI sequence classification model (e.g. bge-m3-zeroshot-v2.0)."""
+
+    model: Any
+    tokenizer: Any
+    pad_token_id: int
+    entailment_idx: int
+    max_tokens: int
+    device: torch.device
+    dtype: torch.dtype
+    attn_impl: str
+    chunked_sdpa: bool
+
+
+ModelBundle = AmberBundle | NliBundle
+
+
+def _resolve_entailment_index(config: Any) -> int:
+    """Resolve the 'entailment' class index dynamically from model.config.id2label."""
+    id2label = getattr(config, "id2label", None)
+    if not isinstance(id2label, Mapping) or not id2label:
+        raise RuntimeError("Sequence classification model config is missing id2label mapping.")
+    matches: list[int] = []
+    for raw_idx, raw_label in id2label.items():
+        if isinstance(raw_label, str) and raw_label.strip().lower() == "entailment":
+            if isinstance(raw_idx, bool):
+                continue
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid id2label index {raw_idx!r}.") from exc
+            if idx < 0:
+                raise RuntimeError(f"Invalid negative id2label index {idx}.")
+            matches.append(idx)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected exactly one 'entailment' label in model config id2label, found {id2label!r}."
+        )
+    return matches[0]
+
+
+def _resolve_nli_max_tokens(config: Any) -> int:
+    """Compute the strict maximum sequence token length supported by an NLI encoder config."""
+    raw_max_pos = getattr(config, "max_position_embeddings", None)
+    if isinstance(raw_max_pos, int) and not isinstance(raw_max_pos, bool) and raw_max_pos > 0:
+        model_type = str(getattr(config, "model_type", "") or "").strip().lower()
+        if model_type in {"xlm-roberta", "roberta", "camembert"}:
+            raw_pad = getattr(config, "pad_token_id", 1)
+            pad_id = raw_pad if (isinstance(raw_pad, int) and not isinstance(raw_pad, bool) and raw_pad >= 0) else 1
+            pos_limit = raw_max_pos - pad_id - 1
+            if pos_limit > 0:
+                return min(NLI_MAX_TOKENS, pos_limit)
+        return min(NLI_MAX_TOKENS, raw_max_pos)
+    return NLI_MAX_TOKENS
+
+
 def _snapshot_inv_freq_buffers(model: nn.Module) -> dict[str, torch.Tensor]:
     """Snapshot FP32 RoPE *_inv_freq buffers before FP16 downcasting."""
     named_buffers = getattr(model, "named_buffers", None)
@@ -320,15 +454,8 @@ def _restore_inv_freq_buffers(
             setattr(parent, buf_name, restored)
 
 
-def load_model(path: str, device: str, precision: str | None = None) -> AmberBundle:
+def _load_amber_model(model_dir: Path, target_device: torch.device, dtype: torch.dtype) -> AmberBundle:
     """Load Amber 150M from a local checkpoint directory strictly offline."""
-    clean_device = device.strip()
-    target_device = torch.device(clean_device)
-    if target_device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable. Enable GPU access with the NVIDIA Container Toolkit.")
-    dtype = resolve_dtype(clean_device, precision)
-
-    model_dir = Path(path)
     uni_config_path = model_dir / "uni_config.json"
     weights_path = model_dir / "model.safetensors"
     encoder_dir = model_dir / "encoder"
@@ -356,7 +483,7 @@ def load_model(path: str, device: str, precision: str | None = None) -> AmberBun
     sp = Special.of(tok)
 
     _register_banded_attention()
-    attn_impl = _select_attention_impl(enc_cfg)
+    attn_impl = _select_attention_impl(enc_cfg, AutoModel)
     encoder = AutoModel.from_config(enc_cfg, attn_implementation=attn_impl)
     model = UniModel(encoder, hidden=hidden, width=width, dropout=dropout)
 
@@ -390,6 +517,81 @@ def load_model(path: str, device: str, precision: str | None = None) -> AmberBun
         banded=banded,
         sliding_window=sliding_window,
     )
+
+
+def _load_nli_model(model_dir: Path, target_device: torch.device, dtype: torch.dtype) -> NliBundle:
+    """Load a Hugging Face NLI sequence classification model strictly offline with CPU-first FP16 conversion."""
+    config_path = model_dir / "config.json"
+    if not config_path.is_file():
+        raise RuntimeError(f"Missing model config file: {config_path}")
+    if not any(model_dir.glob("*.safetensors")):
+        raise RuntimeError(f"Missing safetensors weights file in: {model_dir}")
+
+    from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
+
+    cfg = AutoConfig.from_pretrained(str(model_dir), local_files_only=True)
+    tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=True, local_files_only=True)
+    pad_token_id = getattr(tok, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = getattr(cfg, "pad_token_id", None)
+    if isinstance(pad_token_id, bool) or not isinstance(pad_token_id, int) or pad_token_id < 0:
+        raise RuntimeError("NLI tokenizer/config is missing a valid non-negative integer pad_token_id.")
+
+    _register_chunked_sdpa_attention()
+    attn_impl = _select_attention_impl(cfg, AutoModelForSequenceClassification)
+    try:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            str(model_dir),
+            local_files_only=True,
+            attn_implementation=attn_impl,
+        )
+    except TypeError:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            str(model_dir),
+            local_files_only=True,
+        )
+
+    active_cfg = getattr(model, "config", cfg)
+    entailment_idx = _resolve_entailment_index(active_cfg)
+    max_tokens = _resolve_nli_max_tokens(active_cfg)
+
+    inv_freq_snapshots = _snapshot_inv_freq_buffers(model) if dtype == torch.float16 else {}
+    # Downcast to FP16 on CPU first so large embedding matrices (e.g. 250k x 1024) never occupy FP32 VRAM on a 3 GB GPU.
+    if dtype == torch.float16 and target_device.type != "cpu":
+        model = model.to(dtype=dtype)
+    model = model.to(device=target_device, dtype=dtype).eval()
+    if dtype == torch.float16 and inv_freq_snapshots:
+        _restore_inv_freq_buffers(model, inv_freq_snapshots, target_device)
+        del inv_freq_snapshots
+
+    base_attn = getattr(active_cfg, "_attn_implementation", None) or attn_impl
+    return NliBundle(
+        model=model,
+        tokenizer=tok,
+        pad_token_id=pad_token_id,
+        entailment_idx=entailment_idx,
+        max_tokens=max_tokens,
+        device=target_device,
+        dtype=dtype,
+        attn_impl=base_attn,
+        chunked_sdpa=(base_attn == "sdpa"),
+    )
+
+
+def load_model(path: str, device: str, precision: str | None = None) -> ModelBundle:
+    """Detect checkpoint kind (Amber UniModel vs HF NLI sequence classifier) and load strictly offline."""
+    clean_device = device.strip()
+    target_device = torch.device(clean_device)
+    if target_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable. Enable GPU access with the NVIDIA Container Toolkit.")
+    dtype = resolve_dtype(clean_device, precision)
+
+    model_dir = Path(path)
+    if (model_dir / "uni_config.json").is_file():
+        return _load_amber_model(model_dir, target_device, dtype)
+    if (model_dir / "config.json").is_file():
+        return _load_nli_model(model_dir, target_device, dtype)
+    raise RuntimeError(f"Missing model config file (uni_config.json or config.json) in: {model_dir}")
 
 
 def _prepare_item(
@@ -456,13 +658,232 @@ def _prepare_item(
     return label_names, Seq(ids=ids, markers=markers, spans=spans)
 
 
-def classify_batch(
-    bundle: AmberBundle,
+@dataclass(frozen=True, slots=True)
+class _NliPair:
+    """Single tokenized (premise, hypothesis) pair belonging to one batch item and candidate label."""
+
+    item_idx: int
+    label_idx: int
+    ids: list[int]
+
+
+def _build_nli_hypotheses(
+    labels: list[str] | dict[str, str | None],
+    prompt: str | None,
+) -> tuple[list[str], list[str]]:
+    if isinstance(labels, Mapping):
+        label_names = list(labels.keys())
+    elif isinstance(labels, Sequence) and not isinstance(labels, (str, bytes, bytearray)):
+        label_names = list(labels)
+    else:
+        raise ValueError("labels must be a sequence or mapping of candidate labels.")
+
+    if len(label_names) < 2:
+        raise ValueError("At least 2 candidate labels are required.")
+    if any(not isinstance(name, str) or not name.strip() for name in label_names):
+        raise ValueError("Label names must be non-blank strings.")
+    if len(set(label_names)) != len(label_names):
+        raise ValueError("Label names must be unique.")
+
+    if isinstance(labels, Mapping):
+        label_texts = [
+            f"{k.strip()}: {v.strip()}" if (isinstance(v, str) and v.strip()) else k.strip()
+            for k, v in labels.items()
+        ]
+    else:
+        label_texts = [k.strip() for k in label_names]
+
+    if isinstance(prompt, str) and prompt.strip():
+        clean_prompt = prompt.strip()
+        hypotheses = [f"{clean_prompt} {lt}" for lt in label_texts]
+    else:
+        hypotheses = [f"This example is {lt}." for lt in label_texts]
+    return label_names, hypotheses
+
+
+def _prepare_nli_item(
+    bundle: NliBundle,
+    text: str,
+    labels: list[str] | dict[str, str | None],
+    task: str,
+    prompt: str | None,
+) -> tuple[list[str], list[list[int]]]:
+    if not isinstance(text, str):
+        raise ValueError("text must be a string.")
+    if not isinstance(task, str) or not task.strip():
+        raise ValueError("task must be a non-blank string.")
+    if prompt is not None and not isinstance(prompt, str):
+        raise ValueError("prompt must be a string or None.")
+
+    label_names, hypotheses = _build_nli_hypotheses(labels, prompt)
+    encoded = bundle.tokenizer(
+        [text] * len(hypotheses),
+        hypotheses,
+        add_special_tokens=True,
+        truncation=False,
+        padding=False,
+    )
+    raw_input_ids = encoded["input_ids"]
+    pair_ids = [list(seq_ids) for seq_ids in raw_input_ids]
+    if len(pair_ids) != len(label_names):
+        raise ValueError("Tokenizer returned unexpected number of NLI pairs.")
+
+    longest_pair = max((len(ids) for ids in pair_ids), default=0)
+    if longest_pair > bundle.max_tokens:
+        raise InputTooLongError(
+            f"Prepared input length ({longest_pair} tokens) exceeds the {bundle.max_tokens:,}-token limit."
+        )
+    return label_names, pair_ids
+
+
+def _classify_nli_batch(
+    bundle: NliBundle,
     items: Sequence[tuple[str, list[str] | dict[str, str | None], str, str | None]],
-    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    token_budget: int = NLI_TOKEN_BUDGET,
+    max_pairs_per_batch: int = NLI_MAX_PAIRS_PER_BATCH,
 ) -> list[tuple[str, Any]]:
-    """Run micro-batched single-pass classification, isolating per-item validation/length errors."""
+    """Run VRAM-bounded NLI zero-shot classification over (text, hypothesis) pairs with FP32 softmax."""
     if token_budget <= 0:
+        raise ValueError("token_budget must be a positive integer.")
+    if max_pairs_per_batch <= 0:
+        raise ValueError("max_pairs_per_batch must be a positive integer.")
+    if not items:
+        return []
+
+    results: list[tuple[str, Any] | None] = [None] * len(items)
+    prepared: dict[int, tuple[list[str], list[list[int]]]] = {}
+    all_pairs: list[_NliPair] = []
+    item_logits: dict[int, list[float | None]] = {}
+
+    for idx, item in enumerate(items):
+        if not isinstance(item, tuple) or len(item) != 4:
+            results[idx] = ("error", "Invalid classification item tuple.")
+            continue
+        text, labels, task, prompt = item
+        try:
+            label_names, pair_ids = _prepare_nli_item(bundle, text, labels, task, prompt)
+        except InputTooLongError as exc:
+            results[idx] = ("input_too_long", str(exc))
+        except ValueError as exc:
+            results[idx] = ("error", str(exc))
+        else:
+            prepared[idx] = (label_names, pair_ids)
+            item_logits[idx] = [None] * len(label_names)
+            for label_idx, ids in enumerate(pair_ids):
+                all_pairs.append(_NliPair(item_idx=idx, label_idx=label_idx, ids=ids))
+
+    if not prepared:
+        return [
+            res if res is not None else ("error", "Item did not produce a classification result.")
+            for res in results
+        ]
+
+    all_pairs.sort(key=lambda pair: len(pair.ids))
+
+    def _run_nli_group(group: list[_NliPair]) -> None:
+        max_len = max(len(pair.ids) for pair in group)
+        input_ids = torch.full((len(group), max_len), bundle.pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((len(group), max_len), dtype=torch.long)
+        for row_idx, pair in enumerate(group):
+            n = len(pair.ids)
+            input_ids[row_idx, :n] = torch.tensor(pair.ids, dtype=torch.long)
+            attention_mask[row_idx, :n] = 1
+        input_ids = input_ids.to(bundle.device, non_blocking=True)
+        attention_mask = attention_mask.to(bundle.device, non_blocking=True)
+
+        outputs: Any = None
+        logits_tensor: Any = None
+        try:
+            if bundle.chunked_sdpa and max_len > NLI_CHUNKED_SDPA_THRESHOLD:
+                if len(group) != 1:
+                    raise RuntimeError("choice_chunked_sdpa requires an unpadded batch size of 1.")
+                _register_chunked_sdpa_attention()
+                cfg = bundle.model.config
+                prev_attn = cfg._attn_implementation
+                cfg._attn_implementation = NLI_CHUNKED_SDPA_NAME
+                try:
+                    outputs = bundle.model(input_ids=input_ids, attention_mask=attention_mask)
+                finally:
+                    cfg._attn_implementation = prev_attn
+            else:
+                outputs = bundle.model(input_ids=input_ids, attention_mask=attention_mask)
+
+            logits_tensor = outputs.logits
+            rows = logits_tensor.float().cpu().tolist()
+        finally:
+            del input_ids, attention_mask, outputs, logits_tensor
+
+        if len(rows) != len(group):
+            raise RuntimeError("NLI model returned unexpected batch logit count.")
+        for row_idx, pair in enumerate(group):
+            row = rows[row_idx]
+            if not isinstance(row, list) or len(row) <= bundle.entailment_idx:
+                raise RuntimeError("NLI model returned logits missing entailment index.")
+            item_logits[pair.item_idx][pair.label_idx] = float(row[bundle.entailment_idx])
+
+    with torch.inference_mode():
+        group: list[_NliPair] = []
+        longest = 0
+        for pair in all_pairs:
+            seq_len = len(pair.ids)
+            next_longest = max(longest, seq_len)
+            next_count = len(group) + 1
+            if group and (
+                next_count > max_pairs_per_batch
+                or (bundle.chunked_sdpa and seq_len > NLI_CHUNKED_SDPA_THRESHOLD)
+                or next_count * next_longest > token_budget
+                or next_count * next_longest * next_longest > NLI_MAX_ATTN_ELEMENTS
+            ):
+                _run_nli_group(group)
+                group = []
+                longest = 0
+            group.append(pair)
+            longest = max(longest, seq_len)
+            if (bundle.chunked_sdpa and seq_len > NLI_CHUNKED_SDPA_THRESHOLD) or len(group) >= max_pairs_per_batch:
+                _run_nli_group(group)
+                group = []
+                longest = 0
+        if group:
+            _run_nli_group(group)
+
+    for item_idx, (label_names, pair_ids) in prepared.items():
+        raw_scores = item_logits[item_idx]
+        if any(score is None or not math.isfinite(score) for score in raw_scores):
+            results[item_idx] = ("error", "Model returned invalid classification scores.")
+            continue
+        finite_scores = [float(score) for score in raw_scores if score is not None]
+        probs_tensor = torch.softmax(torch.tensor([finite_scores], dtype=torch.float32), dim=-1)
+        probs = [float(v) for v in probs_tensor.tolist()[0]]
+        if len(probs) != len(label_names) or any(not math.isfinite(v) or not (0.0 <= v <= 1.0) for v in probs):
+            results[item_idx] = ("error", "Model returned invalid classification scores.")
+            continue
+        probabilities = dict(zip(label_names, probs, strict=True))
+        choice = max(probabilities, key=probabilities.__getitem__)
+        total_tokens = sum(len(ids) for ids in pair_ids)
+        results[item_idx] = ("ok", (choice, probabilities, total_tokens))
+
+    return [res if res is not None else ("error", "Item did not produce a classification result.") for res in results]
+
+
+def classify_batch(
+    bundle: ModelBundle,
+    items: Sequence[tuple[str, list[str] | dict[str, str | None], str, str | None]],
+    token_budget: int | None = None,
+    *,
+    max_pairs_per_batch: int = NLI_MAX_PAIRS_PER_BATCH,
+) -> list[tuple[str, Any]]:
+    """Run micro-batched classification for Amber or NLI bundles, isolating per-item validation/length errors."""
+    if isinstance(bundle, NliBundle):
+        effective_nli_budget = NLI_TOKEN_BUDGET if token_budget is None else token_budget
+        return _classify_nli_batch(
+            bundle,
+            items,
+            token_budget=effective_nli_budget,
+            max_pairs_per_batch=max_pairs_per_batch,
+        )
+
+    effective_budget = DEFAULT_TOKEN_BUDGET if token_budget is None else token_budget
+    if effective_budget <= 0:
         raise ValueError("token_budget must be a positive integer.")
     if not items:
         return []
@@ -534,7 +955,7 @@ def classify_batch(
             next_count = len(group) + 1
             if group and (
                 (bundle.banded and seq_len > LONG)
-                or next_count * next_longest > token_budget
+                or next_count * next_longest > effective_budget
                 or next_count * next_longest * next_longest > MAX_SDPA_ATTN_ELEMENTS
             ):
                 _run_group(group)
@@ -553,7 +974,7 @@ def classify_batch(
 
 
 def classify_text(
-    bundle: AmberBundle,
+    bundle: ModelBundle,
     text: str,
     labels: list[str] | dict[str, str | None],
     task: str = "decision",
