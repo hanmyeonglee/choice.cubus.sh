@@ -364,6 +364,8 @@ class ModelWorker:
             plane=plane,
         )[0]
         if status == "ok":
+            if isinstance(payload, tuple) and len(payload) >= 2:
+                return payload[0], payload[1]
             return payload
         if status == "input_too_long":
             raise WorkerInputTooLongError(payload)

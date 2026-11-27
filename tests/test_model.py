@@ -763,9 +763,13 @@ class AmberModelUnitTests(unittest.TestCase):
             )
             self.assertEqual(len(res), 4)
             self.assertEqual(res[0][0], "ok")
+            self.assertEqual(len(res[0][1]), 3)
+            self.assertEqual(res[0][1][2], 2109)  # 4 + 1 (prompt) + 2100 (text) + 2*(1+1) (labels)
             self.assertEqual(res[1][0], "input_too_long")
             self.assertEqual(res[2][0], "ok")
+            self.assertEqual(res[2][1][2], 69)  # 4 + 1 + 60 + 4
             self.assertEqual(res[3][0], "ok")
+            self.assertEqual(res[3][1][2], 49)  # 4 + 1 + 40 + 4
 
             # Verify encoder calls:
             # Call 0: padded micro-batch of the 2 short items (B=2, standard sdpa, mask_keys=None)

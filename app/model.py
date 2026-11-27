@@ -515,7 +515,7 @@ def classify_batch(
 
         probs_cpu = torch.softmax(logits.float(), dim=-1).cpu()
         for qi, item_idx in enumerate(group):
-            label_names = prepared[item_idx][0]
+            label_names, seq = prepared[item_idx]
             n_opts = len(label_names)
             probs = [float(v) for v in probs_cpu[qi, :n_opts].tolist()]
             if len(probs) != n_opts or any(not math.isfinite(v) or not (0.0 <= v <= 1.0) for v in probs):
@@ -523,7 +523,7 @@ def classify_batch(
                 continue
             probabilities = dict(zip(label_names, probs, strict=True))
             choice = max(probabilities, key=probabilities.__getitem__)
-            results[item_idx] = ("ok", (choice, probabilities))
+            results[item_idx] = ("ok", (choice, probabilities, len(seq.ids)))
 
     with torch.inference_mode():
         group: list[int] = []
@@ -562,7 +562,7 @@ def classify_text(
     """Classify a single request synchronously against competing candidate labels."""
     status, payload = classify_batch(bundle, [(text, labels, task, prompt)])[0]
     if status == "ok":
-        return payload
+        return payload[0], payload[1]
     if status == "input_too_long":
         raise InputTooLongError(payload)
     raise RuntimeError(payload)

@@ -57,6 +57,15 @@ class _FakeWorker:
     def set_idle_timeout(self, idle_timeout: float) -> None:
         self.idle_timeout = float(idle_timeout)
 
+    def classify_batch(self, items):
+        self.loaded = True
+        results = []
+        for _text, labels, _task, _prompt in items:
+            names = list(labels)
+            prob = 1.0 / len(names)
+            results.append(("ok", (names[0], {name: prob for name in names}, 12)))
+        return results
+
     def classify(self, text: str, labels, task: str = "decision", prompt: str | None = None):
         self.loaded = True
         names = list(labels)
@@ -638,20 +647,25 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
                         # 1. Legacy .env API_KEYS must be rejected with 401
                         r_legacy_bearer = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"Authorization": f"Bearer {legacy_env_key}"},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_legacy_bearer.status_code, 401)
                         r_legacy_xapi = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"X-API-Key": legacy_env_key},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_legacy_xapi.status_code, 401)
+                        r_legacy_models = await pub_cli.get(
+                            "/v1/models",
+                            headers={"Authorization": f"Bearer {legacy_env_key}"},
+                        )
+                        self.assertEqual(r_legacy_models.status_code, 401)
 
                         # 2. Healthz stays unauthenticated
-                        hz = await pub_cli.get("/api/healthz")
+                        hz = await pub_cli.get("/healthz")
                         self.assertEqual(hz.status_code, 200)
 
                         # 3. Create key via :9090 POST /admin/v1/api-keys
@@ -685,38 +699,44 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
                         # 4. Authenticate using Authorization: Bearer AND X-API-Key
                         r_bearer = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"Authorization": f"Bearer {plaintext}"},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_bearer.status_code, 200)
 
                         r_xapi = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"X-API-Key": plaintext},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_xapi.status_code, 200)
 
+                        r_models_ok = await pub_cli.get(
+                            "/v1/models",
+                            headers={"Authorization": f"Bearer {plaintext}"},
+                        )
+                        self.assertEqual(r_models_ok.status_code, 200)
+
                         # Conflicting Bearer + X-API-Key or non-Bearer Authorization -> 401
                         r_conflict = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={
                                 "Authorization": f"Bearer {plaintext}",
                                 "X-API-Key": "chk_" + "0" * 43,
                             },
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_conflict.status_code, 401)
 
                         r_basic = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"Authorization": "Basic abc", "X-API-Key": plaintext},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_basic.status_code, 401)
 
-                        # 5. List keys shows count=2, never leaks plaintext or key_hash
+                        # 5. List keys shows count=3, never leaks plaintext or key_hash
                         list_resp = await adm_cli.get("/admin/v1/api-keys", headers=adm_headers)
                         self.assertEqual(list_resp.status_code, 200)
                         serialized_list = list_resp.text
@@ -724,7 +744,7 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn(hash_api_key(plaintext), serialized_list)
                         items = list_resp.json()["api_keys"]
                         self.assertEqual(len(items), 1)
-                        self.assertEqual(items[0]["request_count"], 2)
+                        self.assertEqual(items[0]["request_count"], 3)
                         self.assertEqual(items[0]["last_used_at"], "2026-11-26T12:00:00Z")
 
                         # 6. Revoke key -> IMMEDIATE 401 on cached key!
@@ -737,11 +757,17 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn("key_hash", rev_body)
 
                         r_after_revoke = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"X-API-Key": plaintext},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_after_revoke.status_code, 401)
+
+                        r_models_after_revoke = await pub_cli.get(
+                            "/v1/models",
+                            headers={"Authorization": f"Bearer {plaintext}"},
+                        )
+                        self.assertEqual(r_models_after_revoke.status_code, 401)
 
                         # 7. Create a second key (never expires), warm cache, then DELETE -> IMMEDIATE 401!
                         create2 = await adm_cli.post(
@@ -755,9 +781,9 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNone(create2.json()["record"]["expires_at"])
 
                         r_k2_ok = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"X-API-Key": key2},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_k2_ok.status_code, 200)
 
@@ -766,9 +792,9 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(del_resp.json(), {"deleted": True, "id": key2_id})
 
                         r_k2_after_del = await pub_cli.post(
-                            "/api/classify",
+                            "/v1/classify",
                             headers={"X-API-Key": key2},
-                            json={"text": "hello", "labels": ["a", "b"]},
+                            json={"input": "hello", "labels": ["a", "b"]},
                         )
                         self.assertEqual(r_k2_after_del.status_code, 401)
 
@@ -793,7 +819,7 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
                 # Lifespan exit must have flushed pending usage counts into backend!
                 stored_records = {str(r.id): r for r in backend.list_keys()}
-                self.assertEqual(stored_records[key_id].request_count, 2)
+                self.assertEqual(stored_records[key_id].request_count, 3)
 
     async def test_admin_api_keys_strict_validation_cidr_bearer_and_db_unavailable(self) -> None:
         backend = InMemoryAPIKeyBackend()
@@ -904,11 +930,19 @@ class PublicAndAdminAPIKeyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     base_url="http://public.local",
                 ) as pub_cli:
                     r503 = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers={"X-API-Key": "chk_" + "a" * 43},
-                        json={"text": "hello", "labels": ["a", "b"]},
+                        json={"input": "hello", "labels": ["a", "b"]},
                     )
                     self.assertEqual(r503.status_code, 503)
+                    self.assertIn("error", r503.json())
+
+                    r503_models = await pub_cli.get(
+                        "/v1/models",
+                        headers={"X-API-Key": "chk_" + "a" * 43},
+                    )
+                    self.assertEqual(r503_models.status_code, 503)
+                    self.assertIn("error", r503_models.json())
 
 
 if __name__ == "__main__":

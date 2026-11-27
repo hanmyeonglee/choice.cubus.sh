@@ -1,20 +1,51 @@
 """Request and response schemas for the Amber 150M classification API."""
 
+from __future__ import annotations
+
+from collections.abc import Mapping
 import json
-from typing import Annotated
+import math
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
+from .runtime import MODEL_ID
+
+MAX_BATCH_INPUTS = 64
+MAX_TEXT_CHARS_CAP = 16000
+
+TextPayload = str | dict[str, JsonValue] | list[JsonValue]
 LabelName = Annotated[str, Field(min_length=1, max_length=64)]
 Description = Annotated[str, Field(min_length=1, max_length=160)]
 TaskName = Annotated[str, Field(min_length=1, max_length=64)]
 PromptText = Annotated[str, Field(min_length=1, max_length=320)]
 
 
-def render_text(value: str | dict[str, JsonValue] | list[JsonValue]) -> str:
+def render_text(value: TextPayload) -> str:
+    """Serialize string, dict, or list payloads into compact JSON text without NaN/Infinity."""
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+class ClassifyInputItem(BaseModel):
+    """Structured input item matching the Jina AI classification input object shape."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: TextPayload = Field(
+        description=(
+            "Source material and context to classify. Pass original prose or labeled sections by "
+            "default; JSON objects and arrays are also accepted and serialized as compact JSON text."
+        ),
+    )
+
+
+ClassifyInput = (
+    str
+    | ClassifyInputItem
+    | Annotated[list[str | ClassifyInputItem], Field(min_length=1, max_length=MAX_BATCH_INPUTS)]
+)
 
 
 class ClassifyRequest(BaseModel):
@@ -22,7 +53,11 @@ class ClassifyRequest(BaseModel):
         extra="forbid",
         json_schema_extra={
             "example": {
-                "text": "I was charged twice for the same order.",
+                "model": MODEL_ID,
+                "input": [
+                    "I was charged twice for the same order.",
+                    {"text": "The checkout page returns a 502 error."},
+                ],
                 "task": "department",
                 "prompt": "Which team should handle this request?",
                 "labels": {
@@ -33,17 +68,26 @@ class ClassifyRequest(BaseModel):
         },
     )
 
-    text: str | dict[str, JsonValue] | list[JsonValue] = Field(
+    model: str = Field(
+        default=MODEL_ID,
         description=(
-            "Source material and context to classify. Use a string containing original prose "
-            "or labeled sections by default. Objects and arrays are also accepted and serialized "
-            "as compact JSON text. The serialized text must not exceed 16,000 characters "
-            "(subject to the active runtime max_text_chars setting), and the complete prepared "
-            "sequence (text + task + prompt + labels) must not exceed 7,999 tokens."
+            'Model identifier. Defaults to "amber-150m" (also accepts "MLukauskas/amber-150m"). '
+            "Unknown model names are rejected with HTTP 400."
+        ),
+        examples=[MODEL_ID, "MLukauskas/amber-150m"],
+    )
+    input: ClassifyInput = Field(
+        description=(
+            "Input text or batch of inputs to classify. Accepts a single string, a single "
+            '{"text": str | dict | list} object, or a non-empty list of 1–64 strings and/or '
+            '{"text": ...} objects. Each serialized item must not exceed 16,000 characters '
+            "(subject to the active runtime max_text_chars setting), and each complete prepared "
+            "sequence (input + task + prompt + labels) must not exceed 7,999 subword tokens."
         ),
         examples=[
             "I was charged twice for the same order.",
-            {"command": "git status -s", "cwd": "/workspace/app"},
+            {"text": {"command": "git status -s", "cwd": "/workspace/app"}},
+            ["I was charged twice.", {"text": "Login returns 500."}],
         ],
     )
     labels: list[LabelName] | dict[LabelName, Description | None] = Field(
@@ -64,23 +108,33 @@ class ClassifyRequest(BaseModel):
         default=None,
         description="Optional question or classification instruction describing the decision.",
     )
-    _rendered_text: str | None = PrivateAttr(default=None)
+    _rendered_inputs: list[str] | None = PrivateAttr(default=None)
+
+    def _compute_rendered_inputs(self) -> list[str]:
+        raw_items = self.input if isinstance(self.input, list) else [self.input]
+        rendered: list[str] = []
+        for idx, item in enumerate(raw_items):
+            payload = item.text if isinstance(item, ClassifyInputItem) else item
+            text = render_text(payload)
+            if not text.strip():
+                raise ValueError(f"input[{idx}] must not be blank.")
+            if len(text) > MAX_TEXT_CHARS_CAP:
+                raise ValueError(
+                    f"input[{idx}] must not exceed {MAX_TEXT_CHARS_CAP:,} characters after serialization."
+                )
+            rendered.append(text)
+        return rendered
 
     @property
-    def rendered_text(self) -> str:
-        """Return the cached serialized text produced during request validation."""
-        if self._rendered_text is None:
-            self._rendered_text = render_text(self.text)
-        return self._rendered_text
+    def rendered_inputs(self) -> list[str]:
+        """Return the cached serialized input strings produced during request validation."""
+        if self._rendered_inputs is None:
+            self._rendered_inputs = self._compute_rendered_inputs()
+        return self._rendered_inputs
 
     @model_validator(mode="after")
-    def validate_inputs(self):
-        rendered = render_text(self.text)
-        if not rendered.strip():
-            raise ValueError("text must not be blank.")
-        if len(rendered) > 16000:
-            raise ValueError("text must not exceed 16,000 characters after serialization.")
-        self._rendered_text = rendered
+    def validate_inputs(self) -> ClassifyRequest:
+        self._rendered_inputs = self._compute_rendered_inputs()
         if not self.task.strip():
             raise ValueError("task must not be blank.")
         if self.prompt is not None and not self.prompt.strip():
@@ -100,11 +154,89 @@ class ClassifyRequest(BaseModel):
         return self
 
 
-class ClassifyResponse(BaseModel):
-    choice: str = Field(description="Highest-scoring candidate label.")
-    probabilities: dict[str, float] = Field(
+class PredictionScore(BaseModel):
+    label: str = Field(description="Candidate label name.")
+    score: float = Field(description="Native softmax score for this candidate label.")
+
+
+class ClassificationResult(BaseModel):
+    object: Literal["classification"] = "classification"
+    index: int = Field(description="Zero-based index corresponding to the input item.")
+    prediction: str = Field(description="Highest-scoring candidate label.")
+    score: float = Field(description="Softmax score of the winning prediction.")
+    predictions: list[PredictionScore] = Field(
         description=(
-            "Native softmax scores across all candidate labels in their requested order. "
+            "All candidate labels sorted descending by score (ties preserve requested label order). "
             "Scores sum to 1 (up to floating-point precision) and are not calibrated probabilities of truth."
         )
+    )
+
+
+class UsageInfo(BaseModel):
+    prompt_tokens: int = Field(description="Total prepared subword tokens processed across all input items.")
+    total_tokens: int = Field(description="Total tokens processed (equal to prompt_tokens for classification).")
+
+
+class ClassifyResponse(BaseModel):
+    object: Literal["list"] = "list"
+    model: str = Field(description="Canonical model identifier used for inference.")
+    data: list[ClassificationResult] = Field(description="Ordered classification results for each input item.")
+    usage: UsageInfo = Field(description="Token usage summary for the request.")
+
+
+class ModelCard(BaseModel):
+    id: str = Field(description="Model identifier.")
+    object: Literal["model"] = "model"
+    owned_by: str = Field(description="Model publisher.")
+
+
+class ModelListResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[ModelCard] = Field(description="Available classification models.")
+
+
+class ErrorDetail(BaseModel):
+    message: str
+    type: str
+    code: str
+
+
+class ErrorEnvelope(BaseModel):
+    error: ErrorDetail
+
+
+def unpack_classify_payload(payload: Any) -> tuple[str, dict[str, float], int]:
+    """Unpack either a 3-tuple (choice, probs, token_count) or legacy 2-tuple (choice, probs)."""
+    if isinstance(payload, tuple) and len(payload) == 3:
+        choice, probabilities, token_count = payload
+        if not isinstance(probabilities, Mapping):
+            raise ValueError("Invalid probabilities mapping in classification payload.")
+        if isinstance(token_count, bool) or not isinstance(token_count, int) or token_count < 0:
+            raise ValueError("Invalid token count in classification payload.")
+        return str(choice), dict(probabilities), token_count
+    if isinstance(payload, tuple) and len(payload) == 2:
+        choice, probabilities = payload
+        if not isinstance(probabilities, Mapping):
+            raise ValueError("Invalid probabilities mapping in classification payload.")
+        return str(choice), dict(probabilities), 0
+    raise ValueError("Unexpected classification payload shape.")
+
+
+def build_classification_result(index: int, probabilities: Mapping[str, float]) -> ClassificationResult:
+    """Build a ClassificationResult with predictions sorted descending (ties preserve request order)."""
+    if not isinstance(probabilities, Mapping) or not probabilities:
+        raise ValueError("Probabilities mapping must not be empty.")
+    validated: list[tuple[str, float]] = []
+    for label, score in probabilities.items():
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+            raise ValueError("Classification scores must be finite numbers.")
+        validated.append((str(label), float(score)))
+    ordered = sorted(validated, key=lambda kv: -kv[1])
+    top_label, top_score = ordered[0]
+    return ClassificationResult(
+        object="classification",
+        index=index,
+        prediction=top_label,
+        score=top_score,
+        predictions=[PredictionScore(label=label, score=score) for label, score in ordered],
     )

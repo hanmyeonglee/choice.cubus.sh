@@ -20,6 +20,7 @@ import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 
 from .api_keys import (
     APIKeyStore,
@@ -28,7 +29,16 @@ from .api_keys import (
     parse_api_key_uuid,
     validate_create_api_key_payload,
 )
-from .runtime import APP_VERSION, MAIN_PORT, MODEL_ID, SETTINGS_SCHEMA, ChoiceRuntime, SettingsValidationError
+from .runtime import (
+    APP_VERSION,
+    MAIN_PORT,
+    MODEL_ID,
+    SETTINGS_SCHEMA,
+    SUPPORTED_MODELS,
+    ChoiceRuntime,
+    SettingsValidationError,
+)
+from .schemas import build_classification_result, render_text, unpack_classify_payload
 from .worker import WorkerCancelledError
 
 
@@ -46,8 +56,7 @@ MIN_ADMIN_TOKEN_LEN = 16
 MAX_ADMIN_BODY_BYTES = 16 << 10  # 16 KiB
 MAX_ADMIN_CLASSIFY_BODY_BYTES = 256 << 10  # 256 KiB
 MAX_ADMIN_BATCH_ITEMS = 64
-MAX_ADMIN_ITEM_ID_CHARS = 64
-MAX_ADMIN_ITEM_TEXT_CHARS = 4000
+MAX_ADMIN_ITEM_TEXT_CHARS = 16000
 MAX_ADMIN_PROMPT_CHARS = 512
 MAX_ADMIN_TASK_CHARS = 64
 MIN_ADMIN_LABELS = 2
@@ -328,10 +337,13 @@ async def _read_bounded_json_object(request: Request, max_bytes: int, context: s
             raise _AdminBodyError(413, "request body too large")
 
     body = bytearray()
-    async for chunk in request.stream():
-        if len(body) + len(chunk) > max_bytes:
-            raise _AdminBodyError(413, "request body too large")
-        body.extend(chunk)
+    try:
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > max_bytes:
+                raise _AdminBodyError(413, "request body too large")
+            body.extend(chunk)
+    except ClientDisconnect as exc:
+        raise _AdminBodyError(499, "request cancelled") from exc
 
     try:
         return _parse_strict_json_object(bytes(body), context=context)
@@ -349,17 +361,51 @@ def _validate_non_blank_str(value: object, name: str, max_len: int) -> str:
     return value
 
 
-def _validate_classify_batch_payload(
+def _validate_admin_input_item(entry: object, name: str) -> str:
+    if isinstance(entry, str):
+        rendered = entry
+    elif isinstance(entry, dict):
+        unknown = sorted(set(entry) - {"text"})
+        if unknown:
+            raise SettingsValidationError(f"{name} contains unknown field {unknown[0]!r}")
+        if "text" not in entry:
+            raise SettingsValidationError(f"{name} must contain 'text'")
+        raw_text = entry["text"]
+        if not isinstance(raw_text, (str, dict, list)):
+            raise SettingsValidationError(f"{name}.text must be a string, object, or array")
+        try:
+            rendered = render_text(raw_text)
+        except (ValueError, RecursionError) as exc:
+            raise SettingsValidationError(f"{name}.text contains invalid JSON value") from exc
+    else:
+        raise SettingsValidationError(f"{name} must be a string or an object with 'text'")
+
+    if not rendered.strip():
+        raise SettingsValidationError(f"{name} must not be blank")
+    if len(rendered) > MAX_ADMIN_ITEM_TEXT_CHARS:
+        raise SettingsValidationError(f"{name} must not exceed {MAX_ADMIN_ITEM_TEXT_CHARS} characters")
+    return rendered
+
+
+def _validate_classify_payload(
     parsed: dict[str, Any],
-) -> tuple[list[tuple[str, str]], list[str] | dict[str, str | None], str, str | None]:
-    allowed_top = {"prompt", "task", "labels", "items"}
+) -> tuple[list[str], list[str] | dict[str, str | None], str, str | None]:
+    allowed_top = {"model", "input", "labels", "task", "prompt"}
     unknown_top = sorted(set(parsed) - allowed_top)
     if unknown_top:
         raise SettingsValidationError(f"unknown field {unknown_top[0]!r}")
     if "labels" not in parsed:
         raise SettingsValidationError("labels is required")
-    if "items" not in parsed:
-        raise SettingsValidationError("items is required")
+    if "input" not in parsed:
+        raise SettingsValidationError("input is required")
+
+    if "model" in parsed:
+        raw_model = parsed["model"]
+        if not isinstance(raw_model, str):
+            raise SettingsValidationError("model must be a string")
+        if raw_model not in SUPPORTED_MODELS:
+            supported = ", ".join(sorted(SUPPORTED_MODELS))
+            raise SettingsValidationError(f"unknown model {raw_model!r}; supported models: {supported}")
 
     prompt: str | None = None
     if "prompt" in parsed and parsed["prompt"] is not None:
@@ -401,31 +447,19 @@ def _validate_classify_batch_payload(
     else:
         raise SettingsValidationError("labels must be a list of strings or an object")
 
-    raw_items = parsed["items"]
-    if not isinstance(raw_items, list):
-        raise SettingsValidationError("items must be a non-empty list")
-    if not (1 <= len(raw_items) <= MAX_ADMIN_BATCH_ITEMS):
-        raise SettingsValidationError(f"items must contain between 1 and {MAX_ADMIN_BATCH_ITEMS} entries")
+    raw_input = parsed["input"]
+    validated_texts: list[str] = []
+    if isinstance(raw_input, list):
+        if not (1 <= len(raw_input) <= MAX_ADMIN_BATCH_ITEMS):
+            raise SettingsValidationError(f"input must contain between 1 and {MAX_ADMIN_BATCH_ITEMS} entries")
+        for idx, entry in enumerate(raw_input):
+            validated_texts.append(_validate_admin_input_item(entry, f"input[{idx}]"))
+    elif isinstance(raw_input, (str, dict)):
+        validated_texts.append(_validate_admin_input_item(raw_input, "input"))
+    else:
+        raise SettingsValidationError("input must be a string, an object with 'text', or a non-empty list")
 
-    validated_items: list[tuple[str, str]] = []
-    seen_ids: set[str] = set()
-    allowed_item_keys = {"id", "text"}
-    for idx, entry in enumerate(raw_items):
-        if not isinstance(entry, dict):
-            raise SettingsValidationError(f"items[{idx}] must be a JSON object")
-        unknown_item = sorted(set(entry) - allowed_item_keys)
-        if unknown_item:
-            raise SettingsValidationError(f"items[{idx}] contains unknown field {unknown_item[0]!r}")
-        if "id" not in entry or "text" not in entry:
-            raise SettingsValidationError(f"items[{idx}] must contain 'id' and 'text'")
-        item_id = _validate_non_blank_str(entry["id"], f"items[{idx}].id", MAX_ADMIN_ITEM_ID_CHARS)
-        if item_id in seen_ids:
-            raise SettingsValidationError(f"duplicate item id {item_id!r}")
-        seen_ids.add(item_id)
-        item_text = _validate_non_blank_str(entry["text"], f"items[{idx}].text", MAX_ADMIN_ITEM_TEXT_CHARS)
-        validated_items.append((item_id, item_text))
-
-    return validated_items, validated_labels, task, prompt
+    return validated_texts, validated_labels, task, prompt
 
 
 def _error_response(
@@ -566,7 +600,7 @@ def create_admin_app(
             "endpoints": {
                 "settings_get": "GET /admin/v1/settings",
                 "settings_update": "PATCH /admin/v1/settings",
-                "classify_batch": "POST /admin/v1/classify/batch",
+                "classify": "POST /admin/v1/classify",
                 "api_keys_list": "GET /admin/v1/api-keys",
                 "api_keys_create": "POST /admin/v1/api-keys",
                 "api_keys_revoke": "POST /admin/v1/api-keys/{id}/revoke",
@@ -677,13 +711,13 @@ def create_admin_app(
 
         return JSONResponse(status_code=200, content=updated)
 
-    @app.post("/admin/v1/classify/batch")
-    async def classify_batch_admin(request: Request) -> JSONResponse:
+    @app.post("/admin/v1/classify")
+    async def classify_admin(request: Request) -> JSONResponse:
         try:
             parsed = await _read_bounded_json_object(
-                request, MAX_ADMIN_CLASSIFY_BODY_BYTES, "classify batch payload"
+                request, MAX_ADMIN_CLASSIFY_BODY_BYTES, "classify payload"
             )
-            validated_items, labels, task, prompt = _validate_classify_batch_payload(parsed)
+            validated_texts, labels, task, prompt = _validate_classify_payload(parsed)
         except _AdminBodyError as exc:
             return _error_response(exc.status_code, str(exc))
         except SettingsValidationError as exc:
@@ -693,7 +727,7 @@ def create_admin_app(
         if worker is None:
             return _error_response(503, "model worker unavailable")
 
-        batch_inputs = [(item_text, labels, task, prompt) for _, item_text in validated_items]
+        batch_inputs = [(item_text, labels, task, prompt) for item_text in validated_texts]
         cancel_event = threading.Event()
         classify_batch_fn = worker.classify_batch
         kwargs: dict[str, Any] = {}
@@ -743,30 +777,48 @@ def create_admin_app(
             if isinstance(worker_exc, WorkerCancelledError):
                 return _error_response(499, "request cancelled")
             if isinstance(worker_exc, RuntimeError):
-                logging.warning("Admin batch classification failed: %s", worker_exc)
+                logging.warning("Admin classification failed: %s", worker_exc)
                 return _error_response(503, "model worker unavailable")
             raise worker_exc
 
         if disconnected or raw_results is None:
             return _error_response(499, "request cancelled")
 
-        if len(raw_results) != len(validated_items):
+        if len(raw_results) != len(validated_texts):
             logging.error(
-                "Admin batch classification result length mismatch: %d != %d",
+                "Admin classification result length mismatch: %d != %d",
                 len(raw_results),
-                len(validated_items),
+                len(validated_texts),
             )
             return _error_response(500, "internal server error")
 
-        results: list[dict[str, Any]] = []
-        for (item_id, _), entry_result in zip(validated_items, raw_results, strict=True):
+        data: list[dict[str, Any]] = []
+        total_tokens = 0
+        for idx, entry_result in enumerate(raw_results):
             status, payload = entry_result
             if status == "ok":
-                choice, probabilities = payload
-                results.append({"id": item_id, "choice": choice, "probabilities": probabilities})
+                try:
+                    _choice, probabilities, token_count = unpack_classify_payload(payload)
+                    item = build_classification_result(idx, probabilities).model_dump()
+                except ValueError as exc:
+                    data.append({"object": "classification", "index": idx, "error": str(exc)})
+                    continue
+                data.append(item)
+                total_tokens += token_count
             else:
-                results.append({"id": item_id, "error": str(payload)})
+                data.append({"object": "classification", "index": idx, "error": str(payload)})
 
-        return JSONResponse(status_code=200, content={"model": MODEL_ID, "results": results})
+        return JSONResponse(
+            status_code=200,
+            content={
+                "object": "list",
+                "model": MODEL_ID,
+                "data": data,
+                "usage": {
+                    "prompt_tokens": total_tokens,
+                    "total_tokens": total_tokens,
+                },
+            },
+        )
 
     return _AdminGuardMiddleware(app, config)

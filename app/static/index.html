@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Classify text against candidate labels with Choice API backed by Amber 150M. Explore request examples and API documentation.">
+  <meta name="description" content="Classify single or batched text inputs against candidate labels with Choice API backed by Amber 150M. Explore request examples and API documentation.">
   <title>Choice — Amber 150M Classification API</title>
   <style>
     :root { color-scheme: dark; --bg: #111512; --panel: #191e1a; --line: #333c35; --text: #edf1e9; --muted: #a4afa6; --accent: #c7ef92; }
@@ -68,23 +68,27 @@
       <div class="hero">
         <div class="eyebrow">TEXT IN. DECISION OUT.</div>
         <h1>Send context.<br>Get decisions.</h1>
-        <p class="intro">Classify text against competing candidate labels with Amber 150M. Supply bare label lists or descriptive candidate definitions with an optional question prompt.</p>
+        <p class="intro">Classify single or batched inputs against competing candidate labels with Amber 150M via a standard Jina AI / OpenAI-style <code>/v1</code> API.</p>
         <div class="actions"><a class="button" href="/docs">Open API docs →</a><a class="secondary" href="#quickstart">View request example</a></div>
-        <div class="endpoint"><span class="method">POST</span><code>/api/classify</code><span class="auth">Bearer or X-API-Key authentication</span></div>
+        <div class="endpoint"><span class="method">POST</span><code>/v1/classify</code><span class="auth">Bearer or X-API-Key authentication</span></div>
       </div>
       <div class="types">
-        <article class="type"><h2>01 / text</h2><p>Send original prose, labeled sections, or structured JSON objects up to 8,000 characters by default (configurable up to 16,000).</p></article>
+        <article class="type"><h2>01 / input</h2><p>Send a string, a <code>{"text": ...}</code> object, or a batch of 1–64 items up to 8,000 chars each by default (configurable up to 16,000).</p></article>
         <article class="type"><h2>02 / labels</h2><p>Pass 2–16 competing labels as a list of names or a dictionary with concise descriptions.</p></article>
-        <article class="type"><h2>03 / choice</h2><p>Receive the winning label and native softmax scores across all candidates.</p></article>
+        <article class="type"><h2>03 / data</h2><p>Receive ordered predictions sorted by score plus exact <code>prompt_tokens</code> and <code>total_tokens</code> usage.</p></article>
       </div>
       <section id="quickstart">
         <h2>Your first request</h2>
         <p>Set <code>BASE_URL</code> to your service URL and <code>API_KEY</code> to your issued <code>chk_…</code> API key. Pass it via <code>Authorization: Bearer $API_KEY</code> or <code>X-API-Key: $API_KEY</code>. You can also send requests using the Authorize button in the docs.</p>
-        <pre><code>curl "$BASE_URL/api/classify" \
+        <pre><code>curl "$BASE_URL/v1/classify" \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
-    "text": "I was charged twice for the same order.",
+    "model": "amber-150m",
+    "input": [
+      "I was charged twice for the same order.",
+      {"text": "The checkout page returns a 502 error."}
+    ],
     "task": "department",
     "prompt": "Which team should handle this request?",
     "labels": {
@@ -92,13 +96,14 @@
       "technical": "Website, login, or technical outages"
     }
   }'</code></pre>
-        <p class="note">Returns <code>choice</code> (the top-scoring candidate) and <code>probabilities</code> (native softmax scores across all candidate labels in request order).</p>
+        <p class="note">Returns <code>object: "list"</code>, canonical <code>model</code>, ordered <code>data</code> entries with <code>prediction</code>, <code>score</code>, and descending <code>predictions</code>, plus <code>usage</code> token counts.</p>
       </section>
       <section id="request-guide" aria-labelledby="guide-heading">
         <h2 id="guide-heading">Competing candidates, clear context</h2>
-        <p>Use a string by default for <code>text</code>, and define competing candidate labels in <code>labels</code>. For yes/no or safety gates, provide two meaningful competing options rather than a single statement.</p>
+        <p>Pass a string, a <code>{"text": ...}</code> object, or a batch array in <code>input</code>, and define competing candidate labels in <code>labels</code>. For yes/no or safety gates, provide two meaningful competing options rather than a single statement.</p>
         <pre><code>{
-  "text": "git status -s &amp;&amp; pytest -q",
+  "model": "amber-150m",
+  "input": {"text": {"command": "git status -s &amp;&amp; pytest -q", "cwd": "/workspace/app"}},
   "task": "command_safety",
   "prompt": "Classify the risk category of running this command in a developer workspace.",
   "labels": {
@@ -110,7 +115,7 @@
         <ul class="guidelines">
           <li>Pass bare label lists (e.g. <code>["negative", "neutral", "positive"]</code>) when label names are self-explanatory.</li>
           <li>Add concise label descriptions and an optional <code>prompt</code> when domain boundaries need disambiguation.</li>
-          <li>Keep complete prepared inputs within 7,999 subword tokens; oversized inputs return 422 instead of truncating silently.</li>
+          <li>Keep each prepared sequence within 7,999 subword tokens and total request bodies within 256 KiB; oversized inputs return an OpenAI-style error envelope instead of truncating silently.</li>
         </ul>
       </section>
       <section aria-labelledby="endpoints">
@@ -118,11 +123,12 @@
         <div class="table-wrap"><table>
           <thead><tr><th>Method</th><th>Path</th><th>Purpose</th><th>Authentication</th></tr></thead>
           <tbody>
-            <tr><td>POST</td><td><code>/api/classify</code></td><td>Single-choice classification</td><td>Bearer / <code>X-API-Key</code></td></tr>
-            <tr><td>GET</td><td><code>/api/healthz</code></td><td>Readiness</td><td>None</td></tr>
+            <tr><td>POST</td><td><code>/v1/classify</code></td><td>Single or batch classification (1–64 inputs)</td><td>Bearer / <code>X-API-Key</code></td></tr>
+            <tr><td>GET</td><td><code>/v1/models</code></td><td>List available models</td><td>Bearer / <code>X-API-Key</code></td></tr>
+            <tr><td>GET</td><td><code>/healthz</code></td><td>Readiness</td><td>None</td></tr>
           </tbody>
         </table></div>
-        <p class="note">Text defaults to an 8,000-character limit after serialization (configurable up to 16,000) and 7,999 prepared subword tokens. Scores are not calibrated probabilities of correctness.</p>
+        <p class="note">Each serialized input defaults to an 8,000-character limit (configurable up to 16,000) and 7,999 prepared subword tokens. Scores are not calibrated probabilities of correctness.</p>
       </section>
     </main>
     <footer><span>Choice · Amber 150M classification API</span><span><a href="/docs">Docs</a> &nbsp; / &nbsp; <a href="/openapi.json">OpenAPI JSON</a></span></footer>

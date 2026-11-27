@@ -11,6 +11,8 @@ from typing import Any, Protocol
 
 APP_VERSION = "0.3.0"
 MODEL_ID = "amber-150m"
+MODEL_OWNED_BY = "MLukauskas"
+SUPPORTED_MODELS = frozenset({MODEL_ID, f"{MODEL_OWNED_BY}/{MODEL_ID}"})
 MAIN_PORT = 8000
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 180
@@ -30,7 +32,7 @@ SETTINGS_SCHEMA: tuple[dict[str, Any], ...] = (
         "key": "accept_requests",
         "label": "Accept classification requests",
         "type": "bool",
-        "help": "When disabled, POST /api/classify returns HTTP 503 while /api/healthz and the Admin API remain available.",
+        "help": "When disabled, POST /v1/classify returns HTTP 503 while /healthz, /v1/models, and the Admin API remain available.",
     },
     {
         "key": "idle_timeout_seconds",
@@ -46,7 +48,7 @@ SETTINGS_SCHEMA: tuple[dict[str, Any], ...] = (
         "type": "int",
         "min": MIN_MAX_TEXT_CHARS,
         "max": MAX_MAX_TEXT_CHARS,
-        "help": "Maximum character length of serialized text accepted by POST /api/classify (100–16,000).",
+        "help": "Maximum character length of each serialized input item accepted by POST /v1/classify (100–16,000).",
     },
     {
         "key": "max_labels",
@@ -54,7 +56,7 @@ SETTINGS_SCHEMA: tuple[dict[str, Any], ...] = (
         "type": "int",
         "min": MIN_MAX_LABELS,
         "max": MAX_MAX_LABELS,
-        "help": "Maximum number of competing candidate labels accepted per POST /api/classify request (2–16).",
+        "help": "Maximum number of competing candidate labels accepted per POST /v1/classify request (2–16).",
     },
 )
 

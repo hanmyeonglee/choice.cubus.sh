@@ -45,13 +45,15 @@ def _make_store_with_key() -> tuple[APIKeyStore, str]:
 class _FakeWorker:
     """In-memory ModelWorker stand-in that avoids importing torch/transformers in unit tests."""
 
-    def __init__(self, idle_timeout: float = 180.0) -> None:
+    def __init__(self, idle_timeout: float = 180.0, *, return_tokens: bool = True) -> None:
         self.idle_timeout = float(idle_timeout)
         self.loaded = False
+        self.return_tokens = return_tokens
         self.timeout_updates: list[float] = []
         self.calls: list[dict[str, object]] = []
         self.batch_calls: list[list[tuple[object, ...]]] = []
         self.fail_next_batch_exc: Exception | None = None
+        self.score_override: dict[str, float] | None = None
 
     def is_loaded(self) -> bool:
         return self.loaded
@@ -80,14 +82,23 @@ class _FakeWorker:
                 results.append(("error", "Model returned invalid classification scores."))
                 continue
             names = list(labels)
-            prob = 1.0 / len(names)
-            results.append(("ok", (names[0], {name: prob for name in names})))
+            if self.score_override is not None:
+                probs = {name: self.score_override[name] for name in names}
+            else:
+                prob = 1.0 / len(names)
+                probs = {name: prob for name in names}
+            choice = max(probs, key=probs.__getitem__)
+            if self.return_tokens:
+                token_count = 10 + (len(text.split()) if isinstance(text, str) else 0)
+                results.append(("ok", (choice, probs, token_count)))
+            else:
+                results.append(("ok", (choice, probs)))
         return results
 
     def classify(self, text: str, labels, task: str = "decision", prompt: str | None = None):
         status, payload = self.classify_batch([(text, labels, task, prompt)])[0]
         if status == "ok":
-            return payload
+            return payload[0], payload[1]
         if status == "input_too_long":
             raise WorkerInputTooLongError(payload)
         raise RuntimeError(payload)
@@ -337,11 +348,19 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("error", r.json())
 
             # Unknown route and wrong method still return JSON error + required headers.
-            r404 = await cli.get("/api/classify", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+            r404 = await cli.get("/v1/classify", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
             self.assertEqual(r404.status_code, 404)
             self.assertEqual(r404.headers.get("cache-control"), "no-store")
             self.assertEqual(r404.headers.get("x-content-type-options"), "nosniff")
             self.assertIn("error", r404.json())
+
+            # Removed legacy /admin/v1/classify/batch returns 404.
+            r404_legacy = await cli.post(
+                "/admin/v1/classify/batch",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+                json={"labels": ["a", "b"], "items": [{"id": "1", "text": "ok"}]},
+            )
+            self.assertEqual(r404_legacy.status_code, 404)
 
             r405 = await cli.post("/admin/v1/settings", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
             self.assertEqual(r405.status_code, 405)
@@ -437,7 +456,7 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "settings_get": "GET /admin/v1/settings",
                     "settings_update": "PATCH /admin/v1/settings",
-                    "classify_batch": "POST /admin/v1/classify/batch",
+                    "classify": "POST /admin/v1/classify",
                     "api_keys_list": "GET /admin/v1/api-keys",
                     "api_keys_create": "POST /admin/v1/api-keys",
                     "api_keys_revoke": "POST /admin/v1/api-keys/{id}/revoke",
@@ -540,7 +559,7 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
             r413_stream = await cli.patch("/admin/v1/settings", headers=headers, content=chunked_oversized())
             self.assertEqual(r413_stream.status_code, 413)
 
-    async def test_admin_classify_batch_contract_validation_and_guards(self) -> None:
+    async def test_admin_classify_contract_validation_and_guards(self) -> None:
         worker = _FakeWorker()
         rt = ChoiceRuntime()
         cli, _ = self._make_client(runtime=rt)
@@ -548,113 +567,171 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
 
         async with cli:
             # 1. Unauthenticated / outside CIDR -> 401 / 403
-            r401 = await cli.post("/admin/v1/classify/batch", json={"labels": ["a", "b"], "items": [{"id": "1", "text": "ok"}]})
+            r401 = await cli.post("/admin/v1/classify", json={"labels": ["a", "b"], "input": ["ok"]})
             self.assertEqual(r401.status_code, 401)
 
             async with self._make_client(peer=("172.31.0.99", 50000), allow_cidr="172.31.0.2/32", runtime=rt)[0] as bad_cli:
                 r403 = await bad_cli.post(
-                    "/admin/v1/classify/batch",
+                    "/admin/v1/classify",
                     headers={"Authorization": f"Bearer {VALID_TOKEN}", "X-Forwarded-For": "172.31.0.2"},
-                    json={"labels": ["a", "b"], "items": [{"id": "1", "text": "ok"}]},
+                    json={"labels": ["a", "b"], "input": ["ok"]},
                 )
                 self.assertEqual(r403.status_code, 403)
 
             # 2. Worker not yet attached -> 503
             r503 = await cli.post(
-                "/admin/v1/classify/batch",
+                "/admin/v1/classify",
                 headers=headers,
-                json={"labels": ["normal", "suspicious"], "items": [{"id": "0", "text": "GET /health 200"}]},
+                json={"labels": ["normal", "suspicious"], "input": ["GET /healthz 200"]},
             )
             self.assertEqual(r503.status_code, 503)
             self.assertEqual(r503.json(), {"error": "model worker unavailable"})
             self.assertEqual(r503.headers.get("cache-control"), "no-store")
             self.assertEqual(r503.headers.get("x-content-type-options"), "nosniff")
 
-            # Attach worker and test happy path + partial item errors
+            # Attach worker and test happy path, descending sort, partial item errors, and token usage
             rt.attach_worker(worker)
+            worker.score_override = {"normal": 0.15, "suspicious": 0.85}
             ok_resp = await cli.post(
-                "/admin/v1/classify/batch",
+                "/admin/v1/classify",
                 headers=headers,
                 json={
+                    "model": "MLukauskas/amber-150m",
                     "prompt": "Classify the request log severity.",
                     "task": "log_triage",
                     "labels": {"normal": "Expected traffic", "suspicious": "Potential probe or abuse"},
-                    "items": [
-                        {"id": "0", "text": "GET /api/healthz 200"},
-                        {"id": "1", "text": "__TOO_LONG__ payload"},
-                        {"id": "2", "text": "__ERROR__ payload"},
+                    "input": [
+                        "GET /healthz 200",
+                        "__TOO_LONG__ payload",
+                        {"text": "__ERROR__ payload"},
+                        {"text": {"path": "/etc/passwd", "status": 404}},
                     ],
                 },
             )
+            worker.score_override = None
             self.assertEqual(ok_resp.status_code, 200)
             self.assertEqual(ok_resp.headers.get("cache-control"), "no-store")
             self.assertEqual(ok_resp.headers.get("x-content-type-options"), "nosniff")
             self.assertEqual(
                 ok_resp.json(),
                 {
+                    "object": "list",
                     "model": "amber-150m",
-                    "results": [
-                        {"id": "0", "choice": "normal", "probabilities": {"normal": 0.5, "suspicious": 0.5}},
-                        {"id": "1", "error": "Prepared input length (8100 tokens) exceeds the 7,999-token limit."},
-                        {"id": "2", "error": "Model returned invalid classification scores."},
+                    "data": [
+                        {
+                            "object": "classification",
+                            "index": 0,
+                            "prediction": "suspicious",
+                            "score": 0.85,
+                            "predictions": [
+                                {"label": "suspicious", "score": 0.85},
+                                {"label": "normal", "score": 0.15},
+                            ],
+                        },
+                        {
+                            "object": "classification",
+                            "index": 1,
+                            "error": "Prepared input length (8100 tokens) exceeds the 7,999-token limit.",
+                        },
+                        {
+                            "object": "classification",
+                            "index": 2,
+                            "error": "Model returned invalid classification scores.",
+                        },
+                        {
+                            "object": "classification",
+                            "index": 3,
+                            "prediction": "suspicious",
+                            "score": 0.85,
+                            "predictions": [
+                                {"label": "suspicious", "score": 0.85},
+                                {"label": "normal", "score": 0.15},
+                            ],
+                        },
                     ],
+                    # Tokens: item 0 (10+3=13) + item 3 (10+1=11) = 24
+                    "usage": {"prompt_tokens": 24, "total_tokens": 24},
                 },
             )
             self.assertEqual(len(worker.batch_calls), 1)
-            self.assertEqual(len(worker.batch_calls[0]), 3)
+            self.assertEqual(len(worker.batch_calls[0]), 4)
+
+            # 2b. Single string and single {"text": ...} inputs also work
+            single_resp = await cli.post(
+                "/admin/v1/classify",
+                headers=headers,
+                json={"labels": ["a", "b"], "input": "single text"},
+            )
+            self.assertEqual(single_resp.status_code, 200)
+            self.assertEqual(single_resp.json()["data"][0]["index"], 0)
+            self.assertEqual(single_resp.json()["data"][0]["prediction"], "a")
+
+            single_obj_resp = await cli.post(
+                "/admin/v1/classify",
+                headers=headers,
+                json={"labels": ["a", "b"], "input": {"text": ["x", "y"]}},
+            )
+            self.assertEqual(single_obj_resp.status_code, 200)
+            self.assertEqual(worker.calls[-1]["text"], '["x","y"]')
 
             # 3. Works even when accept_requests=false (maintenance mode)
             rt.apply_patch({"accept_requests": False})
             maint_resp = await cli.post(
-                "/admin/v1/classify/batch",
+                "/admin/v1/classify",
                 headers=headers,
                 json={
                     "labels": ["a", "b"],
-                    "items": [{"id": "x", "text": "maintenance triage"}],
+                    "input": ["maintenance triage"],
                 },
             )
             self.assertEqual(maint_resp.status_code, 200)
-            self.assertEqual(maint_resp.json()["results"][0]["choice"], "a")
+            self.assertEqual(maint_resp.json()["data"][0]["prediction"], "a")
 
             # 4. Worker runtime failure -> 503
             worker.fail_next_batch_exc = RuntimeError("worker crashed")
             crash_resp = await cli.post(
-                "/admin/v1/classify/batch",
+                "/admin/v1/classify",
                 headers=headers,
-                json={"labels": ["a", "b"], "items": [{"id": "x", "text": "hello"}]},
+                json={"labels": ["a", "b"], "input": ["hello"]},
             )
             self.assertEqual(crash_resp.status_code, 503)
             self.assertEqual(crash_resp.json(), {"error": "model worker unavailable"})
 
             # 5. Max batch of 64 items and 240-char descriptions + 512-char prompt succeed
-            max_items = [{"id": f"id-{i}", "text": "x" * 1000} for i in range(64)]
+            max_inputs = ["x" * 1000 for _ in range(64)]
             batch64 = await cli.post(
-                "/admin/v1/classify/batch",
+                "/admin/v1/classify",
                 headers=headers,
                 json={
+                    "model": "amber-150m",
                     "prompt": "p" * 512,
                     "task": "t" * 64,
                     "labels": {"a": "d" * 240, "b": None},
-                    "items": max_items,
+                    "input": max_inputs,
                 },
             )
             self.assertEqual(batch64.status_code, 200)
-            self.assertEqual(len(batch64.json()["results"]), 64)
+            self.assertEqual(len(batch64.json()["data"]), 64)
 
             # 5b. Explicit prompt: null is valid
             null_prompt = await cli.post(
-                "/admin/v1/classify/batch",
+                "/admin/v1/classify",
                 headers=headers,
-                json={"prompt": None, "labels": ["a", "b"], "items": [{"id": "0", "text": "hello"}]},
+                json={"prompt": None, "labels": ["a", "b"], "input": ["hello"]},
             )
             self.assertEqual(null_prompt.status_code, 200)
 
             # 6. Strict payload validation -> 400
-            valid_base = {"labels": ["a", "b"], "items": [{"id": "0", "text": "ok"}]}
+            valid_base = {"labels": ["a", "b"], "input": ["ok"]}
             bad_cases: list[str] = [
                 json.dumps({**valid_base, "extra": 1}),
-                json.dumps({"items": [{"id": "0", "text": "ok"}]}),
+                json.dumps({**valid_base, "model": "gpt-4o"}),
+                json.dumps({**valid_base, "model": ""}),
+                json.dumps({**valid_base, "model": None}),
+                json.dumps({**valid_base, "model": 123}),
+                json.dumps({"input": ["ok"]}),
                 json.dumps({"labels": ["a", "b"]}),
+                json.dumps({"labels": ["a", "b"], "items": [{"id": "0", "text": "legacy"}]}),
                 json.dumps({**valid_base, "prompt": ""}),
                 json.dumps({**valid_base, "prompt": "   "}),
                 json.dumps({**valid_base, "prompt": "p" * 513}),
@@ -674,49 +751,111 @@ class AdminAPISecurityAndContractTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps({**valid_base, "labels": {"a": "d" * 241, "b": "ok"}}),
                 json.dumps({**valid_base, "labels": {"a": 123, "b": "ok"}}),
                 json.dumps({**valid_base, "labels": "not-a-list"}),
-                json.dumps({"labels": ["a", "b"], "items": []}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": str(i), "text": "x"} for i in range(65)]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1"}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"text": "x"}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1", "text": "x", "extra": 1}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "", "text": "x"}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": " ", "text": "x"}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "i" * 65, "text": "x"}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1", "text": "x"}, {"id": "1", "text": "y"}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1", "text": ""}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1", "text": "   "}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1", "text": "x" * 4001}]}),
-                json.dumps({"labels": ["a", "b"], "items": [{"id": "1", "text": {"nested": 1}}]}),
-                '{"labels":["a","b"],"labels":["c","d"],"items":[{"id":"1","text":"ok"}]}',
-                '{"labels":["a","b"],"items":[{"id":"1","text":"ok","id":"2"}]}',
-                '{"labels":["a","b"],"items":[{"id":"1","text":"ok"}],"prompt":NaN}',
-                '{"labels":["a","b"],"items":[{"id":"1","text":"ok"}],"prompt":Infinity}',
-                '{"labels":["a","b"],"items":[{"id":"1","text":' + ("[" * 2000) + ("]" * 2000) + "}]}",
+                json.dumps({"labels": ["a", "b"], "input": []}),
+                json.dumps({"labels": ["a", "b"], "input": ["x"] * 65}),
+                json.dumps({"labels": ["a", "b"], "input": 123}),
+                json.dumps({"labels": ["a", "b"], "input": None}),
+                json.dumps({"labels": ["a", "b"], "input": ""}),
+                json.dumps({"labels": ["a", "b"], "input": "   "}),
+                json.dumps({"labels": ["a", "b"], "input": [{}]}),
+                json.dumps({"labels": ["a", "b"], "input": [{"text": "x", "extra": 1}]}),
+                json.dumps({"labels": ["a", "b"], "input": [{"text": ""}]}),
+                json.dumps({"labels": ["a", "b"], "input": [{"text": "   "}]}),
+                json.dumps({"labels": ["a", "b"], "input": [{"text": 123}]}),
+                json.dumps({"labels": ["a", "b"], "input": [{"text": True}]}),
+                json.dumps({"labels": ["a", "b"], "input": ["x" * 16001]}),
+                '{"labels":["a","b"],"labels":["c","d"],"input":["ok"]}',
+                '{"labels":["a","b"],"input":[{"text":"ok","text":"dup"}]}',
+                '{"labels":["a","b"],"input":["ok"],"prompt":NaN}',
+                '{"labels":["a","b"],"input":["ok"],"prompt":Infinity}',
+                '{"labels":["a","b"],"input":[{"text":' + ("[" * 9000) + ("]" * 9000) + "}]}",
                 "[]",
                 "{bad",
             ]
             for raw in bad_cases:
                 with self.subTest(raw=raw[:80]):
-                    bad = await cli.post("/admin/v1/classify/batch", headers=headers, content=raw.encode("utf-8"))
+                    bad = await cli.post("/admin/v1/classify", headers=headers, content=raw.encode("utf-8"))
                     self.assertEqual(bad.status_code, 400)
                     self.assertIn("error", bad.json())
 
             # Invalid UTF-8 -> 400
-            bad_utf8 = await cli.post("/admin/v1/classify/batch", headers=headers, content=b'{"labels":["a","b"],"items":[{"id":"1","text":"\xff"}]}')
+            bad_utf8 = await cli.post("/admin/v1/classify", headers=headers, content=b'{"labels":["a","b"],"input":["\xff"]}')
             self.assertEqual(bad_utf8.status_code, 400)
 
             # 7. Body > 256 KiB -> 413 (both direct and streamed)
-            oversized = b'{"labels":["a","b"],"items":[{"id":"1","text":"' + (b"a" * MAX_ADMIN_CLASSIFY_BODY_BYTES) + b'"}]}'
-            r413 = await cli.post("/admin/v1/classify/batch", headers=headers, content=oversized)
+            oversized = b'{"labels":["a","b"],"input":["' + (b"a" * MAX_ADMIN_CLASSIFY_BODY_BYTES) + b'"]}'
+            r413 = await cli.post("/admin/v1/classify", headers=headers, content=oversized)
             self.assertEqual(r413.status_code, 413)
 
             async def chunked_oversized():
-                yield b'{"labels":["a","b"],"items":[{"id":"1","text":"'
+                yield b'{"labels":["a","b"],"input":["'
                 yield b"a" * MAX_ADMIN_CLASSIFY_BODY_BYTES
-                yield b'"}]}'
+                yield b'"]}'
 
-            r413_stream = await cli.post("/admin/v1/classify/batch", headers=headers, content=chunked_oversized())
+            r413_stream = await cli.post("/admin/v1/classify", headers=headers, content=chunked_oversized())
             self.assertEqual(r413_stream.status_code, 413)
+
+            # 8. Malformed worker payloads (non-mapping probs, NaN, bool) isolated as per-item errors (no 500)
+            with patch.object(
+                worker,
+                "classify_batch",
+                return_value=[
+                    ("ok", ("a", None, 10)),
+                    ("ok", ("a", {"a": float("nan"), "b": 0.5}, 10)),
+                    ("ok", ("a", {"a": True, "b": 0.5}, 10)),
+                    ("ok", ("a", {"a": 0.8, "b": 0.2}, 15)),
+                ],
+            ):
+                r_malformed = await cli.post(
+                    "/admin/v1/classify",
+                    headers=headers,
+                    json={"labels": ["a", "b"], "input": ["x0", "x1", "x2", "x3"]},
+                )
+                self.assertEqual(r_malformed.status_code, 200)
+                m_body = r_malformed.json()
+                self.assertIn("error", m_body["data"][0])
+                self.assertIn("error", m_body["data"][1])
+                self.assertIn("error", m_body["data"][2])
+                self.assertEqual(m_body["data"][3]["prediction"], "a")
+                self.assertEqual(m_body["usage"], {"prompt_tokens": 15, "total_tokens": 15})
+
+        # 9. Mid-body client disconnect in _read_bounded_json_object returns 499 instead of 500
+        cfg = load_admin_config({"ADMIN_API_TOKEN": VALID_TOKEN})
+        admin_asgi = create_admin_app(rt, cfg)
+        sent: list[dict[str, object]] = []
+        step = 0
+
+        async def disc_receive():
+            nonlocal step
+            if step == 0:
+                step = 1
+                return {"type": "http.request", "body": b'{"labels":', "more_body": True}
+            return {"type": "http.disconnect"}
+
+        async def disc_send(msg):
+            sent.append(msg)
+
+        await admin_asgi(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "path": "/admin/v1/classify",
+                "raw_path": b"/admin/v1/classify",
+                "query_string": b"",
+                "headers": [
+                    (b"authorization", f"Bearer {VALID_TOKEN}".encode("ascii")),
+                    (b"content-type", b"application/json"),
+                ],
+                "client": ("127.0.0.1", 51114),
+                "server": ("127.0.0.1", 9090),
+            },
+            disc_receive,
+            disc_send,
+        )
+        self.assertEqual(sent[0]["status"], 499)
+        self.assertEqual(json.loads(sent[1]["body"].decode("utf-8")), {"error": "request cancelled"})
 
 
 class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -749,12 +888,12 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
 
                     # Normal classify works.
                     ok = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers=pub_headers,
-                        json={"text": "x" * 200, "labels": ["a", "b", "c", "d"]},
+                        json={"input": "x" * 200, "labels": ["a", "b", "c", "d"]},
                     )
                     self.assertEqual(ok.status_code, 200)
-                    self.assertEqual(ok.json()["choice"], "a")
+                    self.assertEqual(ok.json()["data"][0]["prediction"], "a")
 
                     # Lower max_text_chars=120 and max_labels=3 via Admin API.
                     patch_limits = await adm_cli.patch(
@@ -766,27 +905,27 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(fake_worker.idle_timeout, 45.0)
 
                     too_long = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers=pub_headers,
-                        json={"text": "x" * 121, "labels": ["a", "b"]},
+                        json={"input": "x" * 121, "labels": ["a", "b"]},
                     )
                     self.assertEqual(too_long.status_code, 422)
 
                     too_many_labels = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers=pub_headers,
-                        json={"text": "x" * 100, "labels": ["a", "b", "c", "d"]},
+                        json={"input": "x" * 100, "labels": ["a", "b", "c", "d"]},
                     )
                     self.assertEqual(too_many_labels.status_code, 422)
 
                     within_limits = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers=pub_headers,
-                        json={"text": "x" * 120, "labels": ["a", "b", "c"]},
+                        json={"input": "x" * 120, "labels": ["a", "b", "c"]},
                     )
                     self.assertEqual(within_limits.status_code, 200)
 
-                    # Pause requests via accept_requests=false -> /api/classify 503, /api/healthz 200.
+                    # Pause requests via accept_requests=false -> /v1/classify 503, /healthz & /v1/models 200.
                     paused = await adm_cli.patch(
                         "/admin/v1/settings",
                         headers=adm_headers,
@@ -795,22 +934,25 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(paused.status_code, 200)
 
                     r503 = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers=pub_headers,
-                        json={"text": "ok", "labels": ["a", "b"]},
+                        json={"input": "ok", "labels": ["a", "b"]},
                     )
                     self.assertEqual(r503.status_code, 503)
+                    self.assertIn("error", r503.json())
 
                     # Unauthenticated request still returns 401 even while paused.
-                    r401 = await pub_cli.post("/api/classify", json={"text": "ok", "labels": ["a", "b"]})
+                    r401 = await pub_cli.post("/v1/classify", json={"input": "ok", "labels": ["a", "b"]})
                     self.assertEqual(r401.status_code, 401)
 
-                    # Healthz and Admin API stay up.
-                    hz = await pub_cli.get("/api/healthz")
+                    # Healthz, /v1/models, and Admin API stay up.
+                    hz = await pub_cli.get("/healthz")
                     self.assertEqual(hz.status_code, 200)
                     self.assertEqual(hz.json()["ok"], True)
+                    mods = await pub_cli.get("/v1/models", headers=pub_headers)
+                    self.assertEqual(mods.status_code, 200)
 
-                    # Re-enable requests -> /api/classify recovers immediately.
+                    # Re-enable requests -> /v1/classify recovers immediately.
                     resumed = await adm_cli.patch(
                         "/admin/v1/settings",
                         headers=adm_headers,
@@ -818,9 +960,9 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(resumed.status_code, 200)
                     r200 = await pub_cli.post(
-                        "/api/classify",
+                        "/v1/classify",
                         headers=pub_headers,
-                        json={"text": "ok", "labels": ["a", "b"]},
+                        json={"input": "ok", "labels": ["a", "b"]},
                     )
                     self.assertEqual(r200.status_code, 200)
 
@@ -892,10 +1034,11 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                 release_timeout.wait(timeout=5.0)
                 super().set_idle_timeout(idle_timeout)
 
-            def classify(self, text: str, labels, task: str = "decision", prompt: str | None = None):
-                entered_public.set()
-                release_public.wait(timeout=5.0)
-                return super().classify(text, labels, task=task, prompt=prompt)
+            def classify_batch(self, items, *, plane: str = "interactive", **_kwargs):
+                if plane == "interactive":
+                    entered_public.set()
+                    release_public.wait(timeout=5.0)
+                return super().classify_batch(items)
 
         slow_worker = _SlowWorker()
         admin_cfg = load_admin_config({"ADMIN_API_TOKEN": VALID_TOKEN})
@@ -923,9 +1066,9 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                     pub_tasks = [
                         asyncio.create_task(
                             pub_cli.post(
-                                "/api/classify",
+                                "/v1/classify",
                                 headers=pub_headers,
-                                json={"text": f"slow-{i}", "labels": ["a", "b"]},
+                                json={"input": f"slow-{i}", "labels": ["a", "b"]},
                             )
                         )
                         for i in range(25)
@@ -943,7 +1086,7 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                     while not entered_timeout.is_set():
                         await asyncio.sleep(0.01)
 
-                    # Admin accept_requests=false & classify/batch MUST respond immediately without hanging!
+                    # Admin accept_requests=false & /admin/v1/classify MUST respond immediately without hanging!
                     r_pause = await asyncio.wait_for(
                         adm_cli.patch(
                             "/admin/v1/settings",
@@ -957,9 +1100,9 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
 
                     r_batch = await asyncio.wait_for(
                         adm_cli.post(
-                            "/admin/v1/classify/batch",
+                            "/admin/v1/classify",
                             headers=adm_headers,
-                            json={"labels": ["normal", "alert"], "items": [{"id": "1", "text": "triage"}]},
+                            json={"labels": ["normal", "alert"], "input": ["triage"]},
                         ),
                         timeout=2.0,
                     )
@@ -971,7 +1114,7 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
                     pub_resps = await asyncio.wait_for(asyncio.gather(*pub_tasks), timeout=5.0)
                     self.assertTrue(all(r.status_code in (200, 503) for r in pub_resps))
 
-    async def test_admin_settings_limiter_isolated_from_classify_batch_saturation(self) -> None:
+    async def test_admin_settings_limiter_isolated_from_classify_saturation(self) -> None:
         runtime = ChoiceRuntime()
         active_batches = 0
         active_lock = threading.Lock()
@@ -999,13 +1142,13 @@ class LiveSettingsAndWorkerTests(unittest.IsolatedAsyncioTestCase):
         headers = {"Authorization": f"Bearer {VALID_TOKEN}", "Content-Type": "application/json"}
 
         async with cli:
-            # Launch 6 concurrent slow classify/batch calls to saturate classify_limiter (capacity=4)
+            # Launch 6 concurrent slow /admin/v1/classify calls to saturate classify_limiter (capacity=4)
             batch_tasks = [
                 asyncio.create_task(
                     cli.post(
-                        "/admin/v1/classify/batch",
+                        "/admin/v1/classify",
                         headers=headers,
-                        json={"labels": ["normal", "alert"], "items": [{"id": f"i-{idx}", "text": "heavy log"}]},
+                        json={"labels": ["normal", "alert"], "input": [f"heavy log {idx}"]},
                     )
                 )
                 for idx in range(6)
@@ -1095,7 +1238,7 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         async with httpx.AsyncClient() as cli:
                             for _ in range(100):
                                 try:
-                                    r_pub = await cli.get(f"http://127.0.0.1:{main_port}/api/healthz")
+                                    r_pub = await cli.get(f"http://127.0.0.1:{main_port}/healthz")
                                     r_adm = await cli.get(
                                         f"http://127.0.0.1:{admin_port}/admin/v1/manifest",
                                         headers={"Authorization": f"Bearer {VALID_TOKEN}"},
@@ -1129,25 +1272,26 @@ class LiveDualUvicornIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(r_patch.status_code, 200)
 
                             r_cls = await cli.post(
-                                f"http://127.0.0.1:{main_port}/api/classify",
+                                f"http://127.0.0.1:{main_port}/v1/classify",
                                 headers={"Authorization": f"Bearer {public_key}"},
-                                json={"text": "hello world", "labels": ["a", "b"]},
+                                json={"input": "hello world", "labels": ["a", "b"]},
                             )
                             self.assertEqual(r_cls.status_code, 503)
 
-                            # Internal batch classify on :9090 still works during maintenance mode
+                            # Internal classify on :9090 still works during maintenance mode
                             # and shares the exact same fake_worker instance with :8000!
                             r_adm_batch = await cli.post(
-                                f"http://127.0.0.1:{admin_port}/admin/v1/classify/batch",
+                                f"http://127.0.0.1:{admin_port}/admin/v1/classify",
                                 headers={"Authorization": f"Bearer {VALID_TOKEN}"},
                                 json={
                                     "labels": ["normal", "alert"],
-                                    "items": [{"id": f"log-{i}", "text": "x" * 3500} for i in range(30)],
+                                    "input": ["x" * 3500 for _ in range(30)],
                                 },
                             )
                             self.assertEqual(r_adm_batch.status_code, 200)
+                            self.assertEqual(r_adm_batch.json()["object"], "list")
                             self.assertEqual(r_adm_batch.json()["model"], "amber-150m")
-                            self.assertEqual(len(r_adm_batch.json()["results"]), 30)
+                            self.assertEqual(len(r_adm_batch.json()["data"]), 30)
                             self.assertEqual(len(fake_worker.batch_calls), 1)
                             self.assertIs(runtime.get_worker(), fake_worker)
                     finally:

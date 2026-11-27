@@ -518,7 +518,7 @@ class ModelWorkerMicroBatchTests(unittest.TestCase):
 
         def _fake_classify_batch(bundle, items):
             assert bundle == {"path": "/tmp/amber"}
-            return [("ok", ("a", {"a": 0.8, "b": 0.2})) for _ in items]
+            return [("ok", ("a", {"a": 0.8, "b": 0.2}, 42)) for _ in items]
 
         fake_model_mod.classify_batch = _fake_classify_batch
 
@@ -539,7 +539,7 @@ class ModelWorkerMicroBatchTests(unittest.TestCase):
             self.assertTrue(parent_conn.poll(3.0))
             r_status, r_payload = parent_conn.recv()
             self.assertEqual(r_status, "batch_ok")
-            self.assertEqual(r_payload, [("ok", ("a", {"a": 0.8, "b": 0.2}))])
+            self.assertEqual(r_payload, [("ok", ("a", {"a": 0.8, "b": 0.2}, 42))])
 
             parent_conn.send(None)
             parent_conn.close()
